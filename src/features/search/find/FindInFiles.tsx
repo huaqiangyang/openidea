@@ -106,6 +106,7 @@ function FindInFilesDialog() {
   const s = useFindPopup();
   const txt = useTxTemplate();
   const root = useProject((p) => p.project?.root ?? null);
+  const workspace = useProject((p) => !!p.project?.workspace);
   const editors = useEditorRegistry((r) => r.editors);
   const modules = useProjectModules();
   const customScopes = useCustomScopeList();
@@ -698,7 +699,7 @@ function FindInFilesDialog() {
                         <T>replaced ·</T>{" "}
                       </span>
                     )}
-                    {basename(r.relPath)} <span className={styles.rowLine}>{r.line + 1}</span>
+                    {workspace ? r.relPath : basename(r.relPath)} <span className={styles.rowLine}>{r.line + 1}</span>
                   </span>
                 </>
               );

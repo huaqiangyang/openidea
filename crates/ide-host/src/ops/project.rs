@@ -14,6 +14,8 @@ pub struct ProjectInfo {
     pub name: String,
     pub is_git: bool,
     pub settings: Settings,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<ide_workspace::workspace::Workspace>,
 }
 
 pub fn info(project: &Project) -> ProjectInfo {
@@ -28,6 +30,7 @@ pub fn info(project: &Project) -> ProjectInfo {
         is_git: !project.repos.read().is_empty(),
         settings,
         root: project.root.clone().into(),
+        workspace: ide_workspace::workspace::Workspace::load(&project.root).ok().flatten(),
     }
 }
 
@@ -51,6 +54,16 @@ pub fn settings(host: &Host, window: &str) -> Settings {
 
 pub fn roots(host: &Host, window: &str) -> IdeResult<ide_workspace::ProjectRoots> {
     Ok(host.project(window)?.roots())
+}
+
+pub fn save_workspace(host: &Host, window: &str, name: &str, paths: Vec<std::path::PathBuf>) -> IdeResult<ProjectInfo> {
+    let project = host.project(window)?;
+    ide_workspace::workspace::Workspace::save(&project.root, name, paths, false)?;
+    project.settings.reload();
+    project.refresh_index_scope();
+    project.refresh_repositories();
+    project.sink.emit(ide_core::IdeEvent::ProjectRootsChanged { root: project.root.clone().into() });
+    Ok(info(&project))
 }
 
 /// What [`set_settings`] changed; the caller tells the windows.

@@ -80,3 +80,16 @@ describe("decideClose", () => {
     expect(confirmExitEnabled(null)).toBe(false);
   });
 });
+
+it("includes pending local edits and restored dirty buffers before backend dirty events", async () => {
+  const service = await import("@/workbench/contributions");
+  const { dirtyCount, _setDirtyForTests } = await import("../closeGuard");
+  const spy = vi.spyOn(service, "maybeEditorService").mockReturnValue({ dirtyDocumentIds: () => [10, 11] } as never);
+  try {
+    _setDirtyForTests([11, 12]);
+    expect(dirtyCount()).toBe(3);
+  } finally {
+    _setDirtyForTests([]);
+    spy.mockRestore();
+  }
+});

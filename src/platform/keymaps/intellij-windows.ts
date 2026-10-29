@@ -187,6 +187,8 @@ export const intellijWindows: Record<string, string[]> = {
   "editor.nextSplitter": ["Alt+Tab"],
   "editor.prevSplitter": ["Alt+Shift+Tab"],
   "window.toggleFullScreen": [],
+  "window.nextTab": ["Ctrl+Alt+PageDown"],
+  "window.previousTab": ["Ctrl+Alt+PageUp"],
   "window.next": ["Ctrl+Alt+]"],
   "window.previous": ["Ctrl+Alt+["],
   "file.reloadFromDisk": ["Ctrl+Alt+Y"],

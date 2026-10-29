@@ -359,6 +359,29 @@ fn change(range: Range, text: &str) -> AppliedChange {
 // ------------------------------------------------------------------ tests
 
 #[tokio::test(flavor = "multi_thread")]
+async fn linked_projects_initialize_separate_language_server_roots() {
+    let h = harness(&[("mock", incremental_caps())]);
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    let roots = vec![first.path().to_path_buf(), second.path().to_path_buf()];
+    h.mgr.set_content_roots(roots.clone());
+    for root in &roots {
+        let file = root.join("same.mk");
+        std::fs::write(&file, "hello").unwrap();
+        h.mgr.did_open(DocId::next(), &file, &h.lang, 1, "hello");
+    }
+    let server = h.launcher.state("mock");
+    eventually(|| server.requested("initialize").len() == 2).await;
+    let mut actual: Vec<_> =
+        server.requested("initialize").iter().map(|r| r["rootUri"].as_str().unwrap().to_owned()).collect();
+    let mut expected: Vec<_> = roots.iter().map(|p| uri_of(p)).collect();
+    actual.sort();
+    expected.sort();
+    assert_eq!(actual, expected);
+    h.mgr.shutdown_all().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn initialize_and_incremental_sync() {
     let h = harness(&[("mock", incremental_caps())]);
     let (doc, path) = h.open("a.mk", "fn main() {\n}\n");

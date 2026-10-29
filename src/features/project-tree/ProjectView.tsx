@@ -279,6 +279,7 @@ const Row = memo(function Row({
           <HighlightedText
             className={clsx(
               styles.label,
+              node.root && styles.rootName,
               // Only the project itself is bold (IDEA); contributed roots like Scratches are not.
               node.root && !node.icon && styles.rootLabel,
               faded && !deco.color && styles.excluded,

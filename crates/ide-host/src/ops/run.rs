@@ -11,9 +11,29 @@ pub fn configs(host: &Host, window: &str) -> IdeResult<Vec<RunConfig>> {
     let user = ide_run::load_user_configs(&root)?;
     let mut all: Vec<RunConfig> =
         ide_run::detect(&root).into_iter().filter(|d| !user.iter().any(|u| u.id == d.id)).collect();
-    all.extend(user);
-    // Project interpreter / package manager / toolchains from Languages & Frameworks.
+    all.extend(user.clone());
     ide_sdk::apply::apply_to_run_configs(&mut all, &root, &project.settings.effective());
+    if let Some(workspace) = ide_workspace::workspace::Workspace::load(&root)? {
+        for member in workspace.projects.into_iter().filter(|p| p.is_dir()) {
+            let settings = ide_workspace::SettingsStore::load(&host.config_dir, Some(&member)).effective();
+            let mut configs = ide_run::detect(&member);
+            let saved = ide_run::load_user_configs(&member)?;
+            configs.retain(|c| !saved.iter().any(|s| s.id == c.id));
+            configs.extend(saved);
+            ide_sdk::apply::apply_to_run_configs(&mut configs, &member, &settings);
+            let key = crate::project::project_key(&member);
+            let name = member.file_name().unwrap_or_default().to_string_lossy();
+            for mut config in configs {
+                config.id = format!("workspace:{}:{}", key, config.id);
+                config.name = format!("{name} / {}", config.name);
+                config.cwd = Some(config.cwd.map(|p| member.join(&*p)).unwrap_or_else(|| member.clone()).into());
+                config.detected = true;
+                if !user.iter().any(|u| u.id == config.id) {
+                    all.push(config);
+                }
+            }
+        }
+    }
     Ok(all)
 }
 
@@ -35,17 +55,25 @@ pub async fn start(host: &Host, window: &str, config: RunConfig, on_output: Emit
             .run(&settings, &project.root, &config, project.sink.clone(), Box::new(move |c| out(c)))
             .await;
     }
-    let settings = project.settings.effective();
+    let member = ide_workspace::workspace::Workspace::load(&project.root)?.and_then(|workspace| {
+        let cwd = config.cwd.as_deref()?;
+        workspace.projects.into_iter().filter(|root| cwd.starts_with(root)).max_by_key(|root| root.components().count())
+    });
+    let root = member.as_ref().unwrap_or(&project.root);
+    let settings = match &member {
+        Some(root) => ide_workspace::SettingsStore::load(&host.config_dir, Some(root)).effective(),
+        None => project.settings.effective(),
+    };
     // Configurations made in the UI name bare tools (`godot`) that may live outside PATH.
     let mut config = config;
-    ide_sdk::apply::resolve_run_command(&mut config, &project.root, &settings);
+    ide_sdk::apply::resolve_run_command(&mut config, root, &settings);
     if config.command == ide_sdk::godot::COMMAND {
         return Err(IdeError::unavailable(ide_sdk::godot::NOT_FOUND));
     }
     let encoding = settings.console.encoding;
     let options = StartOptions {
         encoding: Some(encoding).filter(|e| !e.trim().is_empty()),
-        python_paths: super::python::paths(&project),
+        python_paths: if member.is_some() { vec![root.clone()] } else { super::python::paths(&project) },
     };
     host.processes.start(&project.root, &config, &options, project.sink.clone(), Box::new(move |c| on_output(c)))
 }

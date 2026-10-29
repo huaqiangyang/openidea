@@ -23,6 +23,8 @@ import { connectRemote, isRemoteWindow } from "@/platform/remote";
 import { holdSplash } from "@/platform/splash";
 import { editorService, maybeEditorService, notifications } from "@/workbench/contributions";
 import { chooseProjectWindow } from "@/workbench/projectWindow";
+import { cycleWindowTab } from "@/platform/windowGroups";
+import { showWorkspaceDialog } from "./WorkspaceDialog";
 
 export const LAUNCH_EVENT = "openidea://launch";
 
@@ -197,6 +199,90 @@ export async function consumeLaunch(): Promise<void> {
 
 export function windowActions(): Action[] {
   return [
+    {
+      id: "workspace.create",
+      title: "New Workspace…",
+      category: t("app.category.file"),
+      icon: "folder",
+      run: () => {
+        if (!desktopOnly()) showWorkspaceDialog("create");
+      },
+    },
+    {
+      id: "workspace.open",
+      title: "Open Workspace…",
+      category: t("app.category.file"),
+      icon: "folder-open",
+      run: async () => {
+        if (desktopOnly()) return;
+        const path = await pickFolder("Open Workspace");
+        if (path) await openProjectWithPolicy(path);
+      },
+    },
+    {
+      id: "workspace.manage",
+      title: "Manage Workspace…",
+      category: t("app.category.file"),
+      when: "workspaceOpen",
+      run: () => showWorkspaceDialog("manage"),
+    },
+    {
+      id: "window.mergeAllWindows",
+      title: "Merge All Project Windows",
+      category: t("app.category.window"),
+      when: "projectOpen",
+      run: async () => {
+        if (!desktopOnly()) await call(commands.windowGroupMerge());
+      },
+    },
+    {
+      id: "window.detachTab",
+      title: "Move Tab to New Window",
+      category: t("app.category.window"),
+      when: "windowGrouped",
+      run: () => call(commands.windowGroupDetach()),
+    },
+    {
+      id: "window.selectTab",
+      title: "Select Project Tab",
+      hidden: true,
+      when: "windowGrouped",
+      run: async ({ arg }) => {
+        if (typeof arg === "string") await call(commands.windowGroupSelect(arg));
+      },
+    },
+    {
+      id: "window.closeTab",
+      title: "Close Project Tab",
+      hidden: true,
+      when: "windowGrouped",
+      run: async ({ arg }) => {
+        if (typeof arg === "string") await call(commands.windowGroupClose(arg));
+      },
+    },
+    {
+      id: "window.reorderTabs",
+      title: "Reorder Project Tabs",
+      hidden: true,
+      when: "windowGrouped",
+      run: async ({ arg }) => {
+        if (Array.isArray(arg) && arg.every((v) => typeof v === "string")) await call(commands.windowGroupReorder(arg));
+      },
+    },
+    {
+      id: "window.nextTab",
+      title: "Next Project Tab",
+      category: t("app.category.window"),
+      when: "windowGrouped",
+      run: () => cycleWindowTab(true),
+    },
+    {
+      id: "window.previousTab",
+      title: "Previous Project Tab",
+      category: t("app.category.window"),
+      when: "windowGrouped",
+      run: () => cycleWindowTab(false),
+    },
     {
       id: "file.openInNewWindow",
       title: t("app.action.openInNewWindow"),

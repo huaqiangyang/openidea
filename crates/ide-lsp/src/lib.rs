@@ -155,6 +155,7 @@ impl DocSnap {
 pub struct LspManager {
     me: Weak<LspManager>,
     project_root: PathBuf,
+    content_roots: RwLock<Vec<PathBuf>>,
     languages: Arc<LanguageRegistry>,
     sink: SharedSink,
     launcher: Arc<dyn Launcher>,
@@ -283,6 +284,7 @@ impl LspManager {
         Arc::new_cyclic(|me| Self {
             me: me.clone(),
             project_root,
+            content_roots: RwLock::new(Vec::new()),
             languages,
             sink,
             launcher,
@@ -302,9 +304,24 @@ impl LspManager {
 
     // ---- server lookup & lifecycle ----
 
+    pub fn set_content_roots(&self, roots: Vec<PathBuf>) {
+        *self.content_roots.write() = roots;
+    }
+
+    fn project_root_for(&self, path: &Path) -> PathBuf {
+        self.content_roots
+            .read()
+            .iter()
+            .chain(std::iter::once(&self.project_root))
+            .filter(|root| path.starts_with(root))
+            .max_by_key(|root| root.components().count())
+            .cloned()
+            .unwrap_or_else(|| self.project_root.clone())
+    }
+
     fn server_for(&self, cfg: &LanguageServerConfig, language: &LanguageId, path: &Path) -> Arc<Server> {
         let mut servers = self.servers.lock();
-        let root = launch::find_root(&self.project_root, path, &cfg.root_markers).unwrap_or_else(|| {
+        let root = launch::find_root(&self.project_root_for(path), path, &cfg.root_markers).unwrap_or_else(|| {
             // Outside the project (library sources, …): reuse a running instance.
             servers
                 .iter()
@@ -332,7 +349,9 @@ impl LspManager {
             if sc.fallback && available_before {
                 continue;
             }
-            if sc.require_root_marker && launch::marked_root(&self.project_root, path, &sc.root_markers).is_none() {
+            if sc.require_root_marker
+                && launch::marked_root(&self.project_root_for(path), path, &sc.root_markers).is_none()
+            {
                 continue;
             }
             let server = self.server_for(sc, language, path);

@@ -74,7 +74,13 @@ pub async fn start(
                     Some(&literals),
                     &|p| documents.text_of(p),
                     &cancel,
-                    &|file| events(SearchEvent::File { file }),
+                    &|mut file| {
+                        if dir != &root {
+                            let name = dir.file_name().unwrap_or_default().to_string_lossy();
+                            file.rel_path = format!("{name}/{}", file.rel_path);
+                        }
+                        events(SearchEvent::File { file });
+                    },
                 )?;
                 total.files += s.files;
                 total.matches += s.matches;

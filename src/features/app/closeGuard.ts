@@ -17,7 +17,7 @@ import { ask, type Ask } from "@/workbench/messages";
 const dirtyDocs = new Set<number>();
 
 export function dirtyCount(): number {
-  return dirtyDocs.size;
+  return new Set([...dirtyDocs, ...(maybeEditorService()?.dirtyDocumentIds?.() ?? [])]).size;
 }
 
 export function confirmExitEnabled(settings: Settings | null | undefined): boolean {
