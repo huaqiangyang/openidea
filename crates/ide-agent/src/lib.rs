@@ -314,8 +314,8 @@ impl AgentManager {
     }
 
     /// The slash commands to complete for `provider`, in `task`'s directory or (without one)
-    /// in the project: what the agent offered last time there, plus, for Claude Code, the
-    /// skills and custom commands on disk it has not listed.
+    /// in the project: what the agent offered last time there, unadvertised builtins,
+    /// and, for Claude Code, skills and custom commands on disk it has not listed.
     pub async fn commands(&self, provider: &str, task: Option<&str>) -> IdeResult<Vec<AgentCommand>> {
         let (provider, offered, cwd) = match task {
             Some(id) => {
@@ -325,6 +325,14 @@ impl AgentManager {
             }
             None => (provider.to_owned(), self.shared.known_commands(provider), self.shared.paths.project_root.clone()),
         };
+        // Commands the agent implements itself and never lists (its CLI builtins):
+        // merged without duplicating what `availableCommands` or the disk offer.
+        let mut offered = offered;
+        for &(name, description) in builtin_commands(&provider) {
+            if !offered.iter().any(|c| c.name == name) {
+                offered.push(AgentCommand { name: name.to_owned(), description: description.to_owned(), hint: None });
+            }
+        }
         if provider != "claude" && provider != "claude-acp" {
             return Ok(offered);
         }
@@ -539,6 +547,10 @@ impl AgentManager {
                 o.current = Some(value);
             }
             s.task.model = model_of(&s.task.config).or(s.task.model.take());
+            let provider = s.task.provider.clone();
+            let config = s.task.config.clone();
+            drop(s);
+            task.shared.remember(&provider, Some(&config), None);
         }
         task.approve_pending();
         task.persist();
@@ -1203,7 +1215,6 @@ impl Task {
             (if known { reported } else { s.task.config.clone() }, s.wanted.clone())
         };
         config::add_client_options(&provider_id, &mut options);
-        self.shared.remember(&provider_id, Some(&options), None);
         for choice in &wanted {
             // An option the session doesn't offer yet is set once it does (`apply_late_choices`).
             let Some(o) = options.iter().find(|o| o.id == choice.id).cloned() else { continue };
@@ -1232,6 +1243,7 @@ impl Task {
                 Err(e) => tracing::warn!("agent task {}: setting {} to {} failed: {e}", self.id, o.id, choice.value),
             }
         }
+        self.shared.remember(&provider_id, Some(&options), None);
         {
             let mut s = self.state.lock();
             s.task.model = model_of(&options).or(s.task.model.take());
@@ -1647,6 +1659,16 @@ fn retry_of(update: &Value, now: f64) -> Option<AgentRetry> {
 
 fn model_of(config: &[AgentConfigOption]) -> Option<String> {
     config.iter().find(|o| o.category.as_deref() == Some("model")).and_then(|o| o.current.clone())
+}
+
+/// Commands the agent implements on its own and never lists in `availableCommands` —
+/// its CLI builtins, passed through as prompt text (e.g. `/compact`). `(name, description)`.
+fn builtin_commands(provider: &str) -> &'static [(&'static str, &'static str)] {
+    match provider {
+        // OpenCode ACP handles `/compact` via session.summarize but omits it from its command list.
+        "opencode" => &[("compact", "compact the conversation")],
+        _ => &[],
+    }
 }
 
 fn file_name(path: &Path) -> String {

@@ -174,28 +174,6 @@ pub fn path_with_tools(app_data: &Path, path: &std::ffi::OsStr) -> OsString {
     std::env::join_paths(dirs).unwrap_or_else(|_| path.to_owned())
 }
 
-/// `PATH` plus the usual per-user tool locations (GUI apps on macOS start with a minimal `PATH`).
-pub fn default_search_path() -> OsString {
-    let mut dirs: Vec<PathBuf> =
-        ide_core::process::host_var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
-    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from) {
-        for rel in [".cargo/bin", ".local/bin", "go/bin", ".bun/bin", ".volta/bin", ".npm-global/bin", "Library/pnpm"] {
-            dirs.push(home.join(rel));
-        }
-        if let Ok(entries) = std::fs::read_dir(home.join(".nvm/versions/node")) {
-            let mut versions: Vec<PathBuf> = entries.flatten().map(|e| e.path().join("bin")).collect();
-            versions.sort();
-            dirs.extend(versions.into_iter().rev());
-        }
-    }
-    for d in ["/opt/homebrew/bin", "/usr/local/go/bin", "/usr/local/bin", "/usr/bin", "/bin"] {
-        dirs.push(PathBuf::from(d));
-    }
-    let mut seen = HashSet::new();
-    dirs.retain(|d| !d.as_os_str().is_empty() && seen.insert(d.clone()));
-    std::env::join_paths(dirs).unwrap_or_default()
-}
-
 static INSTALLING: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 
 struct InstallGuard(String);
@@ -331,12 +309,13 @@ pub struct Tools {
     custom: BTreeMap<String, PathBuf>,
     /// Executables found outside the search path (app bundles), by command.
     found: BTreeMap<String, PathBuf>,
+    version_timeout: Duration,
 }
 
 impl Tools {
-    /// Tools under `<app_data>/tools` using [`default_search_path`].
+    /// Tools under `<app_data>/tools` using [`ide_core::tool_path::search_path`].
     pub fn new(app_data: &Path) -> Self {
-        Self::with_paths(tools_dir(app_data), default_search_path(), Platform::current())
+        Self::with_paths(tools_dir(app_data), ide_core::tool_path::search_path(), Platform::current())
     }
 
     pub fn with_paths(root: PathBuf, search_path: OsString, platform: Platform) -> Self {
@@ -344,7 +323,15 @@ impl Tools {
         let system: Vec<PathBuf> = std::env::split_paths(&search_path).filter(|d| !ours.contains(d)).collect();
         let system_path = std::env::join_paths(&system).unwrap_or_default();
         let child_path = std::env::join_paths(ours.iter().chain(system.iter())).unwrap_or_default();
-        Self { root, system_path, child_path, platform, custom: BTreeMap::new(), found: BTreeMap::new() }
+        Self {
+            root,
+            system_path,
+            child_path,
+            platform,
+            custom: BTreeMap::new(),
+            found: BTreeMap::new(),
+            version_timeout: Duration::from_secs(4),
+        }
     }
 
     /// Reports the executables chosen in settings (command → path) as the tools' location.
@@ -364,7 +351,7 @@ impl Tools {
     }
 
     fn which(&self, cmd: &str) -> Option<PathBuf> {
-        which::which_in(cmd, Some(&self.system_path), &self.root).ok()
+        ide_core::tool_path::find_command(cmd, &self.system_path, &self.root)
     }
 
     fn which_any(&self, cmds: &[&str]) -> Option<PathBuf> {
@@ -428,7 +415,7 @@ impl Tools {
         let program = sibling.or_else(|| self.which(cmd))?;
         let mut c = self.command(program);
         c.args(args);
-        let (ok, out) = run_quiet(c, Duration::from_secs(4))?;
+        let (ok, out) = run_quiet(c, self.version_timeout)?;
         if !ok {
             return None;
         }
@@ -548,7 +535,7 @@ impl Tools {
                 if cmd == spec.commands[0] { path.clone() } else { path.parent().and_then(|d| self.exe_in(d, cmd))? };
             let mut c = self.command(program);
             c.args(args);
-            let (ok, out) = run_quiet(c, Duration::from_secs(4))?;
+            let (ok, out) = run_quiet(c, self.version_timeout)?;
             if ok { parse_version(&out) } else { None }
         });
         info.status = ToolStatus::Custom;
