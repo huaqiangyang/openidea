@@ -2,7 +2,7 @@
 //! watchers and the per-project services, opened by [`crate::Host::open_project`].
 
 use crate::Host;
-use ide_core::{CancellationToken, IdeError, IdeEvent, IdeResult, SharedSink};
+use ide_core::{CancellationToken, IdeError, IdeEvent, IdeResult, LanguageId, SharedSink};
 use ide_index::ProjectIndex;
 use ide_language::{FileTypes, LanguageRegistry, SyntaxCache};
 use ide_lsp::LspManager;
@@ -46,6 +46,8 @@ pub struct Project {
     pub http_history: Arc<ide_http::History>,
     /// Coding agent tasks (Agents tool window).
     pub agents: Arc<ide_agent::AgentManager>,
+    /// Native notebooks and owned kernels, scoped to this project incarnation.
+    pub notebooks: Arc<crate::notebook::NotebookService>,
     pub(crate) watcher: Watcher,
     /// Watchers of the Project Structure content roots outside the project folder.
     pub(crate) content_watchers: Mutex<Vec<(PathBuf, Watcher)>>,
@@ -81,20 +83,14 @@ impl Host {
         let post_start = self.environment.project_opened(&root, &sink);
         let settings = SettingsStore::load(&self.config_dir, Some(&root));
         let detected_roots = Arc::new(RwLock::new(ide_workspace::roots::detect(&root)));
-        let excludes = exclude_globs(&settings.effective(), &detected_roots.read());
+        let excludes = exclude_globs(&root, &settings.effective(), &detected_roots.read());
         let extra_roots = content_roots(&settings.effective(), &root);
         mark("roots");
 
         // The project's own registry: File Types associations may be project-scoped.
         let languages = Arc::new(self.languages.fork());
         languages.set_file_types(FileTypes::from_settings(&settings.effective().files, Some(&root)));
-        let documents = {
-            let languages = languages.clone();
-            Arc::new(Documents::new(
-                sink.clone(),
-                Box::new(move |p: &Path, first: Option<&str>| languages.detect(p, first)),
-            ))
-        };
+        let documents = documents(&sink, &languages, Some(&root));
         documents.set_file_defaults(ide_workspace::FileDefaults::from_settings(&settings.effective(), Some(&root)));
         let history = Arc::new(LocalHistory::open(&self.data_dir.join("history"), &root)?);
         {
@@ -141,7 +137,7 @@ impl Host {
                     let bundles: Vec<PathBuf> =
                         ide_tools::managed_bundle(&data_dir, "java-debug").into_iter().collect();
                     let min_java = ide_sdk::java::jdtls_min_java(cfg);
-                    let jdks = ide_sdk::java::jdtls_jdks(min_java);
+                    let jdks = ide_sdk::java::jdtls_jdks(min_java, &data_dir);
                     let lombok = ide_sdk::lombok::lombok_agent(
                         server_root,
                         ide_sdk::lombok::agent_in_args(cfg.args.iter().map(String::as_str)),
@@ -169,6 +165,27 @@ impl Host {
                     ide_sdk::jdtls::launch_directly(cfg);
                 }
                 ide_sdk::apply::server_protocol_overrides(cfg, &effective);
+                let excluded_poms = unlinked_maven_poms(&root, &effective);
+                ide_sdk::apply::configure_maven_import(cfg, &root, &excluded_poms);
+            }));
+        }
+        {
+            let settings = settings.clone();
+            let root = root.clone();
+            let data_dir = self.data_dir.clone();
+            let sink = sink.clone();
+            lsp.set_prepare_hook(Box::new(move |cfg, _, cancel| {
+                let effective = settings.effective();
+                if cfg.name == "jdtls" {
+                    crate::java_runtime::prepare(
+                        cfg,
+                        &data_dir,
+                        !effective.languages.java.jdtls_jdk.trim().is_empty()
+                            || ide_sdk::apply::jdtls_jdk(&root, &effective).is_err(),
+                        &sink,
+                        cancel,
+                    );
+                }
             }));
         }
         {
@@ -199,6 +216,7 @@ impl Host {
             let settings = settings.clone();
             let index = index.clone();
             let documents = documents.clone();
+            let languages = languages.clone();
             let sink = sink.clone();
             let root = root.clone();
             let detected_roots = detected_roots.clone();
@@ -214,6 +232,12 @@ impl Host {
                     index.update(&changed, &batch.removed);
                     // Atomic saves by external tools surface as `created`.
                     documents.on_disk_changed(&changed);
+                    // A framework's root marker (`angular.json`) created or deleted: its
+                    // templates gain or lose their mode. Markers in `node_modules` only
+                    // count here when the folder isn't excluded (it is by default).
+                    if batch.created.iter().chain(&batch.removed).any(|p| languages.is_framework_marker(p)) {
+                        documents.redetect_languages();
+                    }
                     record_external_changes(&history, &changed, &batch.removed);
                     if !batch.removed.is_empty() {
                         delete_deployed(
@@ -232,7 +256,7 @@ impl Host {
                         if *detected_roots.read() != fresh {
                             // Detected excluded folders (`target`, `build`) leave the index too.
                             let effective = settings.effective();
-                            index.set_scope(content_roots(&effective, &root), exclude_globs(&effective, &fresh));
+                            index.set_scope(content_roots(&effective, &root), exclude_globs(&root, &effective, &fresh));
                             *detected_roots.write() = fresh;
                             sink.emit(IdeEvent::ProjectRootsChanged { root: root.clone().into() });
                         }
@@ -240,7 +264,7 @@ impl Host {
                     // A repository was cloned / initialised / removed below the project: its
                     // `.git/HEAD` (the watcher reports nothing else of `.git`) appeared or went.
                     let known = repos.read().roots();
-                    let git_dirs = changed.iter().chain(&batch.removed).any(|p| {
+                    let git_dirs = changed.iter().chain(&batch.removed).chain(&batch.vcs).any(|p| {
                         let Some(dir) = p.ends_with(".git/HEAD").then(|| p.parent().and_then(Path::parent)).flatten()
                         else {
                             return false;
@@ -250,7 +274,10 @@ impl Host {
                     if git_dirs {
                         scan_repositories(&root, &repos, &settings, &sink);
                     }
-                    sink.emit(IdeEvent::VcsChanged { root: root.clone().into() });
+                    let vcs_moved = batch.vcs.iter().any(|p| vcs_path_changed(p));
+                    if git_dirs || vcs_moved {
+                        sink.emit(IdeEvent::VcsChanged { root: root.clone().into() });
+                    }
                 }),
             )?
         };
@@ -293,6 +320,10 @@ impl Host {
         tracing::info!("opened {} in window {window} in {} ms {laps:?}", root.display(), started.elapsed().as_millis());
 
         let (db, http_history, agents) = self.project_services(&root, &project_key);
+        let notebooks = crate::notebook::NotebookService::new(
+            self.data_dir.join("notebook-runtime").join(uuid::Uuid::new_v4().to_string()),
+            sink.clone(),
+        );
         ide_agent::registry::maintain(crate::ops::agent::registry_paths(self));
         let project = Arc::new(Project {
             root,
@@ -312,6 +343,7 @@ impl Host {
             db,
             http_history,
             agents,
+            notebooks,
             watcher,
             content_watchers: Mutex::new(content_watchers),
             _scratch_watcher: scratch_watcher,
@@ -386,13 +418,7 @@ impl Host {
         let effective = settings.effective();
         let languages = Arc::new(self.languages.fork());
         languages.set_file_types(FileTypes::from_settings(&effective.files, None));
-        let documents = {
-            let languages = languages.clone();
-            Arc::new(Documents::new(
-                sink.clone(),
-                Box::new(move |p: &Path, first: Option<&str>| languages.detect(p, first)),
-            ))
-        };
+        let documents = documents(&sink, &languages, None);
         documents.set_file_defaults(ide_workspace::FileDefaults::from_settings(&effective, None));
         let history = Arc::new(LocalHistory::open(&self.data_dir.join("history"), &dir)?);
         let index = ProjectIndex::unindexed(&dir, languages.clone(), self.syntax(), sink.clone())?;
@@ -404,6 +430,10 @@ impl Host {
         let watcher = light_watcher(&dir, &sink, &documents, &history)?;
         let project_key = project_key(&dir);
         let (db, http_history, agents) = self.project_services(&dir, &project_key);
+        let notebooks = crate::notebook::NotebookService::new(
+            self.data_dir.join("notebook-runtime").join(uuid::Uuid::new_v4().to_string()),
+            sink.clone(),
+        );
         let project = Arc::new(Project {
             sink,
             languages,
@@ -421,6 +451,7 @@ impl Host {
             db,
             http_history,
             agents,
+            notebooks,
             watcher,
             content_watchers: Mutex::new(Vec::new()),
             _scratch_watcher: None,
@@ -449,6 +480,18 @@ impl Project {
             Err(e) => tracing::warn!("watching {}: {e}", dir.display()),
         }
     }
+}
+
+/// The documents of a project whose languages and UI modes `languages` detects,
+/// looking for frameworks' root markers up to `root` (anywhere for loose files).
+fn documents(sink: &SharedSink, languages: &Arc<LanguageRegistry>, root: Option<&Path>) -> Arc<Documents> {
+    let (detect, modes, root) = (languages.clone(), languages.clone(), root.map(Path::to_path_buf));
+    Arc::new(
+        Documents::new(sink.clone(), Box::new(move |p: &Path, first: Option<&str>| detect.detect(p, first)))
+            .with_ui_mode_detection(Box::new(move |p: &Path, lang: &LanguageId| {
+                modes.framework_ui_mode(lang, p, root.as_deref())
+            })),
+    )
 }
 
 fn light_watcher(
@@ -584,7 +627,7 @@ impl Project {
 
     /// Effective source / test / resource / excluded roots (detected + Project Structure marks).
     pub fn roots(&self) -> ProjectRoots {
-        ProjectRoots::compute(self.detected_roots.read().clone(), &self.settings.effective().project_structure)
+        linked_roots(&self.root, &self.settings.effective(), &self.detected_roots.read())
     }
 
     /// Where the Maven / Gradle tool windows cache what the build tools reported.
@@ -646,7 +689,7 @@ impl Project {
 
     /// `files.exclude`, the ignored names and the effective excluded roots (user-marked and detected).
     pub fn exclude_globs(&self) -> Vec<String> {
-        exclude_globs(&self.settings.effective(), &self.detected_roots.read())
+        exclude_globs(&self.root, &self.settings.effective(), &self.detected_roots.read())
     }
 
     /// Project Structure content roots besides the project folder (existing directories).
@@ -692,11 +735,29 @@ impl Project {
         }
     }
 
+    /// Use the open document's selected encoding, or the same detection/settings as opening it.
+    pub fn vcs_encoding(&self, path: &Path, rev: Option<&str>) -> IdeResult<&'static encoding_rs::Encoding> {
+        if let Some(id) = self.documents.by_path(path) {
+            let info = self.documents.snapshot(id)?;
+            return encoding_rs::Encoding::for_label(info.encoding.as_bytes())
+                .ok_or_else(|| ide_core::IdeError::invalid("unknown document encoding"));
+        }
+        let defaults = self.documents.file_defaults();
+        let fallback = defaults.fallback_for(path);
+        if path.exists() {
+            let loaded = ide_vfs::load_text_with_fallback(path, fallback)?;
+            return encoding_rs::Encoding::for_label(loaded.encoding.as_bytes())
+                .ok_or_else(|| ide_core::IdeError::invalid("unknown file encoding"));
+        }
+        let bytes = self.with_repo_of(path, |r| r.file_bytes_at(path, rev))?.unwrap_or_default();
+        Ok(ide_vfs::detect_encoding(&bytes, fallback))
+    }
+
     /// Current text of `path`: the open buffer when available, else the file on disk.
     pub fn text_of(&self, path: &Path) -> IdeResult<String> {
         match self.documents.text_of(path) {
             Some(text) => Ok(text),
-            None => Ok(ide_vfs::load_text(path)?.text),
+            None => Ok(ide_vfs::load_text_with_fallback(path, self.documents.file_defaults().fallback_for(path))?.text),
         }
     }
 }
@@ -797,9 +858,23 @@ fn content_root_watcher(
     .ok()
 }
 
-fn exclude_globs(settings: &ide_core::settings::Settings, detected: &[SourceFolder]) -> Vec<String> {
+pub(crate) fn unlinked_maven_poms(root: &Path, settings: &ide_core::settings::Settings) -> Vec<PathBuf> {
+    ide_build::maven::UnlinkedProjects::load(root, &settings.languages.java.maven).poms().map(PathBuf::from).collect()
+}
+
+fn linked_roots(root: &Path, settings: &ide_core::settings::Settings, detected: &[SourceFolder]) -> ProjectRoots {
+    let unlinked = ide_build::maven::UnlinkedProjects::load(root, &settings.languages.java.maven);
+    let detected = detected
+        .iter()
+        .filter(|folder| !folder.detected_from.as_ref().is_some_and(|pom| unlinked.contains(pom)))
+        .cloned()
+        .collect();
+    ProjectRoots::compute(detected, &settings.project_structure)
+}
+
+fn exclude_globs(root: &Path, settings: &ide_core::settings::Settings, detected: &[SourceFolder]) -> Vec<String> {
     let mut globs = settings.file_excludes();
-    globs.extend(ProjectRoots::compute(detected.to_vec(), &settings.project_structure).excluded_globs());
+    globs.extend(linked_roots(root, settings, detected).excluded_globs());
     globs
 }
 
@@ -929,4 +1004,99 @@ fn notify_transfer(sink: &SharedSink, what: &str, path: &Path, result: IdeResult
 pub fn apply_git_executable(settings: &ide_core::settings::Settings) {
     let exe = settings.vcs.git.executable.trim();
     ide_vcs::set_git_executable((!exe.is_empty()).then(|| Path::new(exe)));
+}
+
+#[cfg(test)]
+mod maven_linkage_tests {
+    #[test]
+    fn unlinked_roots_remain_plain_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        for name in ["a", "b"] {
+            std::fs::create_dir_all(tmp.path().join(name).join("src/main/java")).unwrap();
+            std::fs::write(tmp.path().join(name).join("pom.xml"), "<project/>").unwrap();
+        }
+        std::fs::create_dir_all(tmp.path().join("a/child/src/main/java")).unwrap();
+        std::fs::write(tmp.path().join("a/pom.xml"), "<project><modules><module>child</module></modules></project>")
+            .unwrap();
+        std::fs::write(tmp.path().join("a/child/pom.xml"), "<project/>").unwrap();
+        let detected = ide_workspace::roots::detect(tmp.path());
+        let mut settings = ide_core::settings::Settings::default();
+        settings.languages.java.maven.unlinked_projects.push("a/pom.xml".into());
+        let excluded_poms = super::unlinked_maven_poms(tmp.path(), &settings);
+        assert_eq!(excluded_poms, vec![std::path::PathBuf::from("a/child/pom.xml"), "a/pom.xml".into()]);
+        let configs = ide_run::detect_excluding(tmp.path(), &excluded_poms);
+        assert!(configs.iter().any(|c| c.kind == "maven"));
+        assert!(
+            configs
+                .iter()
+                .filter(|c| c.kind == "maven")
+                .all(|c| { c.cwd.as_ref().is_some_and(|dir| dir.as_ref() == std::path::Path::new("b")) })
+        );
+        let mut server = serde_json::from_value::<ide_language::LanguageServerConfig>(
+            serde_json::json!({"name": "jdtls", "command": "jdtls"}),
+        )
+        .unwrap();
+        ide_sdk::apply::configure_maven_import(&mut server, tmp.path(), &excluded_poms);
+        let options = serde_json::to_value(server.initialization_options).unwrap();
+        let exclusions = options.pointer("/settings/java/import/exclusions").unwrap().as_array().unwrap();
+        assert!(exclusions.contains(&serde_json::json!(tmp.path().join("a").to_string_lossy().replace('\\', "/"))));
+        assert!(
+            exclusions.contains(&serde_json::json!(tmp.path().join("a/child").to_string_lossy().replace('\\', "/")))
+        );
+        let roots = super::linked_roots(tmp.path(), &settings, &detected);
+        assert!(roots.roots.iter().any(|r| r.path == "b/src/main/java"));
+        assert!(!roots.roots.iter().any(|r| r.path.starts_with("a/")));
+        assert!(tmp.path().join("a/pom.xml").is_file());
+        let model = crate::ops::build::load(tmp.path(), &tmp.path().join("cache"), &settings);
+        assert_eq!(model.maven.unwrap().projects.len(), 1);
+        settings.languages.java.maven.unlinked_projects.push("b/pom.xml".into());
+        let model = crate::ops::build::load(tmp.path(), &tmp.path().join("cache"), &settings);
+        assert!(model.maven.unwrap().projects.is_empty());
+    }
+}
+
+fn vcs_path_changed(path: &Path) -> bool {
+    !path.ends_with(".git/index") || !ide_vcs::is_own_index_write(path)
+}
+
+#[cfg(test)]
+mod index_event_tests {
+    use super::vcs_path_changed;
+
+    #[test]
+    fn status_write_is_suppressed_but_external_index_and_refs_refresh() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").current_dir(dir).args(args).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        };
+        git(&["init", "-q"]);
+        let file = dir.join("file.txt");
+        std::fs::write(&file, "original\n").unwrap();
+        git(&["add", "file.txt"]);
+        // Same contents, different stat data: status must refresh the index.
+        std::fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1))
+            .unwrap();
+        let index = dir.join(".git/index");
+        let before = std::fs::read(&index).unwrap();
+        let repo = ide_vcs::Repo::discover(dir).unwrap().unwrap();
+        repo.status().unwrap();
+        assert_ne!(before, std::fs::read(&index).unwrap(), "status must actually write the index");
+        assert!(!vcs_path_changed(&index));
+        assert!(!vcs_path_changed(&index), "duplicate notifications for the same identity");
+        for path in [".git/HEAD", ".git/refs/heads/main", ".git/packed-refs"] {
+            assert!(vcs_path_changed(&dir.join(path)));
+        }
+        std::fs::write(&file, "external staged change\n").unwrap();
+        git(&["add", "file.txt"]);
+        assert!(vcs_path_changed(&index));
+        assert!(vcs_path_changed(&index));
+        std::fs::remove_file(&index).unwrap();
+        assert!(vcs_path_changed(&index));
+    }
 }

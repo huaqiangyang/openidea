@@ -21,7 +21,8 @@ export interface LanguagesValid {
     jdk: string;
     jdtlsJdk: string;
     jdtlsVmArgs: string;
-    maven: { home: string; userSettings: string; localRepository: string };
+    gradle: { jvm: string; distribution: "wrapper" | "local"; home: string; userHome: string };
+    maven: { home: string; userSettings: string; localRepository: string; unlinkedProjects: string[] };
   };
 }
 
@@ -54,7 +55,13 @@ export const DEFAULT_LANGUAGES: LanguagesValid = {
   rust: { toolchain: "", stdlib: "", checkOnSave: true, checkCommand: "check", rustfmtArgs: "" },
   go: { goroot: "", gopath: "" },
   typescript: { version: "bundled" },
-  java: { jdk: "", jdtlsJdk: "", jdtlsVmArgs: "", maven: { home: "", userSettings: "", localRepository: "" } },
+  java: {
+    jdk: "",
+    jdtlsJdk: "",
+    jdtlsVmArgs: "",
+    gradle: { jvm: "", distribution: "wrapper", home: "", userHome: "" },
+    maven: { home: "", userSettings: "", localRepository: "", unlinkedProjects: [] },
+  },
 };
 
 export const DEFAULT_PROJECT_STRUCTURE: ProjectStructureValid = {
@@ -110,6 +117,7 @@ export function validateLanguages(raw: unknown): LanguagesValid {
   const ts = obj(l.typescript);
   const java = obj(l.java);
   const maven = obj(java.maven);
+  const gradle = obj(java.gradle);
   return {
     python: {
       interpreter: text(py.interpreter, d.python.interpreter),
@@ -132,10 +140,17 @@ export function validateLanguages(raw: unknown): LanguagesValid {
       jdk: text(java.jdk, d.java.jdk),
       jdtlsJdk: text(java.jdtlsJdk, d.java.jdtlsJdk),
       jdtlsVmArgs: text(java.jdtlsVmArgs, d.java.jdtlsVmArgs),
+      gradle: {
+        jvm: text(gradle.jvm, d.java.gradle.jvm),
+        distribution: oneOf(gradle.distribution, ["wrapper", "local"] as const, d.java.gradle.distribution),
+        home: text(gradle.home, d.java.gradle.home),
+        userHome: text(gradle.userHome, d.java.gradle.userHome),
+      },
       maven: {
         home: text(maven.home, d.java.maven.home),
         userSettings: text(maven.userSettings, d.java.maven.userSettings),
         localRepository: text(maven.localRepository, d.java.maven.localRepository),
+        unlinkedProjects: folders(maven.unlinkedProjects),
       },
     },
   };
@@ -155,14 +170,6 @@ export function validateProjectStructure(raw: unknown): ProjectStructureValid {
       : [],
     excludeFiles: typeof p.excludeFiles === "string" ? p.excludeFiles : "",
   };
-}
-
-/** The "Exclude files" name patterns (`*.log;tmp*`). */
-export function excludeFilePatterns(excludeFiles: string): string[] {
-  return excludeFiles
-    .split(";")
-    .map((p) => p.trim())
-    .filter(Boolean);
 }
 
 /** Root kinds, as in IDEA's Project Structure (`ide-workspace::roots::RootKind`). */
@@ -282,8 +289,6 @@ export function unmarkedRoots(detected: readonly RootFolder[], ps: ProjectStruct
 export function restoreDetected(ps: ProjectStructureValid, detected: readonly RootFolder[]): ProjectStructureValid {
   return { ...ps, unmarked: ps.unmarked.filter((p) => !detected.some((d) => d.path === folderKey(p))) };
 }
-
-export const PROJECT_STRUCTURE_KEY = (role: FolderRole) => `projectStructure.${ROLE_KEYS[role]}`;
 
 /** Settings keys of `ProjectStructureValid`, in a stable order. */
 export const PROJECT_STRUCTURE_KEYS = [

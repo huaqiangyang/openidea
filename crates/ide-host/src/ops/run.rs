@@ -9,18 +9,15 @@ pub fn configs(host: &Host, window: &str) -> IdeResult<Vec<RunConfig>> {
     let project = host.project(window)?;
     let root = project.root.clone();
     let user = ide_run::load_user_configs(&root)?;
-    let mut all: Vec<RunConfig> =
-        ide_run::detect(&root).into_iter().filter(|d| !user.iter().any(|u| u.id == d.id)).collect();
-    all.extend(user.clone());
-    ide_sdk::apply::apply_to_run_configs(&mut all, &root, &project.settings.effective());
+    let root_suppressed = ide_run::load_suppressed_config_ids(&root)?;
+    let settings = project.settings.effective();
+    let mut all = detected_and_saved(&root, &settings, &user, &root_suppressed);
     if let Some(workspace) = ide_workspace::workspace::Workspace::load(&root)? {
         for member in workspace.projects.into_iter().filter(|p| p.is_dir()) {
             let settings = ide_workspace::SettingsStore::load(&host.config_dir, Some(&member)).effective();
-            let mut configs = ide_run::detect(&member);
             let saved = ide_run::load_user_configs(&member)?;
-            configs.retain(|c| !saved.iter().any(|s| s.id == c.id));
-            configs.extend(saved);
-            ide_sdk::apply::apply_to_run_configs(&mut configs, &member, &settings);
+            let suppressed = ide_run::load_suppressed_config_ids(&member)?;
+            let configs = detected_and_saved(&member, &settings, &saved, &suppressed);
             let key = crate::project::project_key(&member);
             let name = member.file_name().unwrap_or_default().to_string_lossy();
             for mut config in configs {
@@ -28,7 +25,7 @@ pub fn configs(host: &Host, window: &str) -> IdeResult<Vec<RunConfig>> {
                 config.name = format!("{name} / {}", config.name);
                 config.cwd = Some(config.cwd.map(|p| member.join(&*p)).unwrap_or_else(|| member.clone()).into());
                 config.detected = true;
-                if !user.iter().any(|u| u.id == config.id) {
+                if !user.iter().any(|u| u.id == config.id) && !root_suppressed.contains(&config.id) {
                     all.push(config);
                 }
             }
@@ -37,8 +34,34 @@ pub fn configs(host: &Host, window: &str) -> IdeResult<Vec<RunConfig>> {
     Ok(all)
 }
 
-pub fn save_configs(host: &Host, window: &str, configs: &[RunConfig]) -> IdeResult<()> {
-    ide_run::save_user_configs(&host.project(window)?.root, configs)
+/// A project's detected configurations (minus removed ones and unlinked Maven projects), then
+/// its saved ones; toolchains from Languages & Frameworks applied. Gradle choices stay as saved:
+/// derived defaults must not be written back as explicit environment.
+fn detected_and_saved(
+    root: &std::path::Path,
+    settings: &ide_core::settings::Settings,
+    saved: &[RunConfig],
+    suppressed: &[String],
+) -> Vec<RunConfig> {
+    let excluded_poms = crate::project::unlinked_maven_poms(root, settings);
+    let mut all: Vec<RunConfig> = ide_run::detect_excluding(root, &excluded_poms)
+        .into_iter()
+        .filter(|d| !suppressed.contains(&d.id) && !saved.iter().any(|u| u.id == d.id))
+        .collect();
+    all.extend(saved.iter().cloned());
+    for config in all.iter_mut().filter(|c| c.kind != "gradle") {
+        ide_sdk::apply::apply_to_run_configs(std::slice::from_mut(config), root, settings);
+    }
+    all
+}
+
+pub fn save_configs(
+    host: &Host,
+    window: &str,
+    configs: &[RunConfig],
+    removed_detected_ids: &[String],
+) -> IdeResult<()> {
+    ide_run::save_user_configs_with_removals(&host.project(window)?.root, configs, removed_detected_ids)
 }
 
 pub async fn start(host: &Host, window: &str, config: RunConfig, on_output: Emit<OutputChunk>) -> IdeResult<RunInfo> {
@@ -66,7 +89,11 @@ pub async fn start(host: &Host, window: &str, config: RunConfig, on_output: Emit
     };
     // Configurations made in the UI name bare tools (`godot`) that may live outside PATH.
     let mut config = config;
-    ide_sdk::apply::resolve_run_command(&mut config, root, &settings);
+    if config.kind == "gradle" {
+        ide_sdk::apply::apply_to_run_configs(std::slice::from_mut(&mut config), root, &settings);
+    } else {
+        ide_sdk::apply::resolve_run_command(&mut config, root, &settings);
+    }
     if config.command == ide_sdk::godot::COMMAND {
         return Err(IdeError::unavailable(ide_sdk::godot::NOT_FOUND));
     }

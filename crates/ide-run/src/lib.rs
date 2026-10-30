@@ -189,6 +189,11 @@ pub fn detect(root: &Path) -> Vec<RunConfig> {
     detect::detect(root)
 }
 
+/// Detects configurations excluding the supplied project-relative Maven POM paths.
+pub fn detect_excluding(root: &Path, excluded_poms: &[PathBuf]) -> Vec<RunConfig> {
+    detect::detect_excluding(root, excluded_poms)
+}
+
 /// Reads `<root>/.openidea/run.toml`; a missing file yields no configs.
 pub fn load_user_configs(root: &Path) -> IdeResult<Vec<RunConfig>> {
     config::load(root)
@@ -197,7 +202,22 @@ pub fn load_user_configs(root: &Path) -> IdeResult<Vec<RunConfig>> {
 /// Writes `<root>/.openidea/run.toml` (and the workspace-local `run.local.toml` for
 /// configurations not stored as project files), preserving unrelated content.
 pub fn save_user_configs(root: &Path, configs: &[RunConfig]) -> IdeResult<()> {
-    config::save(root, configs)
+    config::save(root, configs, &[])
+}
+
+/// Detected ids explicitly removed in this workspace.
+pub fn load_suppressed_config_ids(root: &Path) -> IdeResult<Vec<String>> {
+    config::load_suppressed(root)
+}
+
+/// Saves user configurations and suppresses explicitly removed detections.
+/// Saving a configuration with a suppressed id restores that id.
+pub fn save_user_configs_with_removals(
+    root: &Path,
+    configs: &[RunConfig],
+    removed_detected_ids: &[String],
+) -> IdeResult<()> {
+    config::save(root, configs, removed_detected_ids)
 }
 
 /// Configuration templates (per-type defaults for new configurations) from `run.toml`.
@@ -217,4 +237,24 @@ pub fn system_env() -> BTreeMap<String, String> {
 /// Path of the user run configuration file for `root`.
 pub fn user_configs_path(root: &Path) -> PathBuf {
     config::config_path(root)
+}
+
+#[cfg(test)]
+mod linkage_tests {
+    #[test]
+    fn detection_skips_unlinked_maven_roots() {
+        let tmp = tempfile::tempdir().unwrap();
+        for name in ["a", "b"] {
+            std::fs::create_dir(tmp.path().join(name)).unwrap();
+            std::fs::write(tmp.path().join(name).join("pom.xml"), "<project/>").unwrap();
+        }
+        let configs = super::detect_excluding(tmp.path(), &["a/pom.xml".into()]);
+        assert!(configs.iter().any(|c| c.kind == "maven"));
+        assert!(
+            configs
+                .iter()
+                .filter(|c| c.kind == "maven")
+                .all(|c| c.cwd.as_ref().is_some_and(|d| d.as_ref() == std::path::Path::new("b")))
+        );
+    }
 }

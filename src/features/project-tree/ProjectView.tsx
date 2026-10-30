@@ -655,6 +655,7 @@ export function ProjectView() {
         isExpandable={isExpandable}
         loadChildren={loadChildren}
         renderNode={renderNode}
+        rowClassName={(n) => (n.excluded ? styles.excludedRow : undefined)}
         expanded={expanded}
         onExpandedChange={onExpandedChange}
         selected={selected}

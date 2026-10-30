@@ -5,6 +5,8 @@ import {
   atEdgeLine,
   canSend,
   completionAt,
+  isPathQuery,
+  resolveTyped,
   imageFromDataUrl,
   mainOptions,
   matchCommands,
@@ -126,6 +128,8 @@ describe("agent composer", () => {
     const config = [option("fast", ["on"], null), option("mode", ["ask", "code"], "code"), option("model", ["m"], "m")];
     expect(mainOptions(config).map((o) => o.id)).toEqual(["model", "mode"]);
     expect(nextValue(config[1]!)).toBe("ask");
+    const approvals = { ...option("openidea.cursor.approval", ["ask", "bypass"], "ask"), category: "approval" };
+    expect(mainOptions([...config, approvals]).map((o) => o.id)).toEqual(["model", "mode", approvals.id]);
     expect(
       ["default", "acceptEdits", "plan", "auto", "bypassPermissions", "auto_edit", "read-only", "x"].map(modeIcon),
     ).toEqual(["lock", "edit", "todo", "run", "unlock", "edit", "eye", "lock"]);
@@ -271,5 +275,20 @@ describe("retryParts", () => {
     const retry = { attempt: 3, maxRetries: 10, retryAtMs: 5_400, error: "Connection error." };
     expect(retryParts(retry, 1_000)).toEqual({ attempt: "3/10", wait: 5 });
     expect(retryParts({ ...retry, maxRetries: null }, 9_000)).toEqual({ attempt: "3", wait: 0 });
+  });
+});
+
+describe("typed path references", () => {
+  it("tells a path from a search", () => {
+    for (const q of ["../", "..", "./a", "/etc", "../x/y"]) expect(isPathQuery(q)).toBe(true);
+    for (const q of ["", "src/le", ".gitignore", "a/../b"]) expect(isPathQuery(q)).toBe(false);
+  });
+
+  it("resolves against the task root", () => {
+    expect(resolveTyped("/r/idea", "../kalo/a.ts")).toBe("/r/kalo/a.ts");
+    expect(resolveTyped("/r/idea", "./src")).toBe("/r/idea/src");
+    expect(resolveTyped("/r/idea", "/etc/hosts")).toBe("/etc/hosts");
+    expect(resolveTyped("C:\\r\\idea", "../kalo/a.ts")).toBe("C:/r/kalo/a.ts");
+    expect(resolveTyped("C:\\r", "../../x")).toBe("C:/x");
   });
 });

@@ -21,7 +21,9 @@ pub use archive::{
 };
 pub use bytes::{ByteRange, FileProbe, MAX_RANGE_LEN, base64, image_mime, probe, read_data_url, read_range};
 use encoding::SNIFF_LEN;
-pub use encoding::{LARGE_FILE_THRESHOLD, MAX_OPEN_SIZE, READ_ONLY_THRESHOLD, encode, write_atomic};
+pub use encoding::{
+    LARGE_FILE_THRESHOLD, MAX_OPEN_SIZE, READ_ONLY_THRESHOLD, encode, write_atomic, write_atomic_strict,
+};
 pub use rules::ExcludeMatcher;
 pub use watch::{WatchMode, Watcher};
 
@@ -303,11 +305,31 @@ pub struct FsBatch {
     pub created: Vec<PathBuf>,
     pub modified: Vec<PathBuf>,
     pub removed: Vec<PathBuf>,
+    /// VCS metadata (`.git/HEAD`, `index`, `refs/**`): reported separately so
+    /// generic `fsChanged` consumers do not treat the backend's own index
+    /// refresh as a worktree edit and schedule another `vcs_status` (which
+    /// writes `.git/index` again — an idle refresh loop).
+    pub vcs: Vec<PathBuf>,
 }
 
 impl FsBatch {
     pub fn is_empty(&self) -> bool {
-        self.created.is_empty() && self.modified.is_empty() && self.removed.is_empty()
+        self.created.is_empty() && self.modified.is_empty() && self.removed.is_empty() && self.vcs.is_empty()
+    }
+}
+
+/// Detect a revision's encoding with the same rules as files opened in the editor.
+pub fn detect_encoding(bytes: &[u8], fallback: Option<&str>) -> &'static encoding_rs::Encoding {
+    let (_, detected, has_bom, binary) = encoding::decode(bytes);
+    if !binary
+        && !has_bom
+        && detected != encoding_rs::UTF_8
+        && detected != encoding_rs::UTF_16LE
+        && detected != encoding_rs::UTF_16BE
+    {
+        fallback.and_then(|label| encoding_rs::Encoding::for_label(label.trim().as_bytes())).unwrap_or(detected)
+    } else {
+        detected
     }
 }
 

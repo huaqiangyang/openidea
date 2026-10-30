@@ -122,10 +122,22 @@ export const commands = {
 	/**  Answers a permission request; `option: null` cancels it. */
 	agentRespond: (task: string, permission: number, option: string | null) => typedError<null, IdeError>(__TAURI_INVOKE("agent_respond", { task, permission, option })),
 	agentArchive: (task: string) => typedError<null, IdeError>(__TAURI_INVOKE("agent_archive", { task })),
+	agentUnarchive: (task: string) => typedError<null, IdeError>(__TAURI_INVOKE("agent_unarchive", { task })),
 	agentDelete: (task: string, removeWorktree: boolean) => typedError<null, IdeError>(__TAURI_INVOKE("agent_delete", { task, removeWorktree })),
 	agentChanges: (task: string) => typedError<AgentChange[], IdeError>(__TAURI_INVOKE("agent_changes", { task })),
 	/**  Content of `path` when the task started (left side of its diff). */
 	agentBaseText: (task: string, path: IpcPath) => typedError<string | null, IdeError>(__TAURI_INVOKE("agent_base_text", { task, path })),
+	notebookOpen: (path: string) => typedError<NotebookSnapshot, IdeError>(__TAURI_INVOKE("notebook_open", { path })),
+	notebookGet: (id: string) => typedError<NotebookSnapshot, IdeError>(__TAURI_INVOKE("notebook_get", { id })),
+	notebookEdit: (id: string, version: number, edit: NotebookEdit) => typedError<NotebookSnapshot, IdeError>(__TAURI_INVOKE("notebook_edit", { id, version, edit })),
+	notebookSave: (id: string) => typedError<NotebookSnapshot, IdeError>(__TAURI_INVOKE("notebook_save", { id })),
+	notebookReload: (id: string) => typedError<NotebookSnapshot, IdeError>(__TAURI_INVOKE("notebook_reload", { id })),
+	notebookUndo: (id: string) => typedError<NotebookSnapshot, IdeError>(__TAURI_INVOKE("notebook_undo", { id })),
+	notebookRedo: (id: string) => typedError<NotebookSnapshot, IdeError>(__TAURI_INVOKE("notebook_redo", { id })),
+	notebookClose: (id: string) => typedError<null, IdeError>(__TAURI_INVOKE("notebook_close", { id })),
+	notebookExecute: (id: string, cells: string[], python: string | null, request: RequestId, onOutput: Channel<NotebookOutputEvent>) => typedError<NotebookSnapshot, IdeError>(__TAURI_INVOKE("notebook_execute", { id, cells, python, request, onOutput })),
+	notebookInterrupt: (id: string) => typedError<null, IdeError>(__TAURI_INVOKE("notebook_interrupt", { id })),
+	notebookRestart: (id: string) => typedError<NotebookSnapshot, IdeError>(__TAURI_INVOKE("notebook_restart", { id })),
 	fsReadDir: (path: string) => typedError<FileEntry[], IdeError>(__TAURI_INVOKE("fs_read_dir", { path })),
 	/**  Size and text/binary classification, from the file's head only. */
 	fsProbe: (path: string) => typedError<FileProbe, IdeError>(__TAURI_INVOKE("fs_probe", { path })),
@@ -163,10 +175,10 @@ export const commands = {
 	 */
 	clipboardSetFileList: (paths: string[]) => typedError<boolean, IdeError>(__TAURI_INVOKE("clipboard_set_file_list", { paths })),
 	/**
-	 *  Every installed family, sorted, each flagged monospaced or not. Read once
-	 *  per run (off the command threads) and cached.
+	 *  Every installed family, sorted, each flagged monospaced or not. Read on
+	 *  first use (off the command threads), cached, and re-queried on `refresh`.
 	 */
-	systemFontFamilies: () => typedError<FontFamily[], IdeError>(__TAURI_INVOKE("system_font_families")),
+	systemFontFamilies: (refresh: boolean) => typedError<FontFamily[], IdeError>(__TAURI_INVOKE("system_font_families", { refresh })),
 	/**
 	 *  Opens a document. Async: reading and decoding a large file must not block
 	 *  the main thread (synchronous commands run on it).
@@ -186,6 +198,11 @@ export const commands = {
 	docSave: (doc: DocId) => typedError<null, IdeError>(__TAURI_INVOKE("doc_save", { doc })),
 	docSaveAll: () => typedError<null, IdeError>(__TAURI_INVOKE("doc_save_all")),
 	docSnapshot: (doc: DocId) => typedError<DocumentInfo, IdeError>(__TAURI_INVOKE("doc_snapshot", { doc })),
+	/**
+	 *  The CodeMirror mode `path` gets when opened (`DocumentInfo::ui_mode`),
+	 *  without opening it: previews of closed files.
+	 */
+	docUiMode: (path: string) => typedError<string | null, IdeError>(__TAURI_INVOKE("doc_ui_mode", { path })),
 	/**  "Reload with Encoding" (`reload`) or "Convert to Encoding"; returns the new encoding label. */
 	docSetEncoding: (doc: DocId, encoding: string, reload: boolean) => typedError<string, IdeError>(__TAURI_INVOKE("doc_set_encoding", { doc, encoding, reload })),
 	docSetLineEnding: (doc: DocId, lineEnding: LineEnding) => typedError<null, IdeError>(__TAURI_INVOKE("doc_set_line_ending", { doc, lineEnding })),
@@ -414,6 +431,7 @@ export const commands = {
 	vcsBranches: (repo: string | null) => typedError<Branch[], IdeError>(__TAURI_INVOKE("vcs_branches", { repo })),
 	vcsStashes: (repo: string | null) => typedError<Stash[], IdeError>(__TAURI_INVOKE("vcs_stashes", { repo })),
 	vcsStage: (paths: string[]) => typedError<null, IdeError>(__TAURI_INVOKE("vcs_stage", { paths })),
+	vcsAddToIgnore: (paths: string[], destination: IgnoreDestination) => typedError<null, IdeError>(__TAURI_INVOKE("vcs_add_to_ignore", { paths, destination })),
 	vcsUnstage: (paths: string[]) => typedError<null, IdeError>(__TAURI_INVOKE("vcs_unstage", { paths })),
 	vcsStagePatch: (patch: string) => typedError<null, IdeError>(__TAURI_INVOKE("vcs_stage_patch", { patch })),
 	vcsDiscard: (paths: string[]) => typedError<null, IdeError>(__TAURI_INVOKE("vcs_discard", { paths })),
@@ -502,6 +520,10 @@ export const commands = {
 	vcsChangelistsSave: (changelists: ChangelistState) => typedError<null, IdeError>(__TAURI_INVOKE("vcs_changelists_save", { changelists })),
 	/**  Create Patch › Save to file. */
 	vcsWritePatch: (path: string, patch: string) => typedError<null, IdeError>(__TAURI_INVOKE("vcs_write_patch", { path, patch })),
+	/**
+	 *  Async to stay off the main thread: forking the IDE (its whole address space)
+	 *  to start the shell takes tens of milliseconds, a frozen UI if run there.
+	 */
 	termSpawn: (options: TerminalOptions, onOutput: Channel<string>) => typedError<TerminalInfo, IdeError>(__TAURI_INVOKE("term_spawn", { options, onOutput })),
 	termWrite: (id: TerminalId, data: string) => typedError<null, IdeError>(__TAURI_INVOKE("term_write", { id, data })),
 	termResize: (id: TerminalId, cols: number, rows: number) => typedError<null, IdeError>(__TAURI_INVOKE("term_resize", { id, cols, rows })),
@@ -517,7 +539,7 @@ export const commands = {
 	termAvailableShells: () => __TAURI_INVOKE<string[]>("term_available_shells"),
 	/**  Detected configs followed by user-defined ones (user ids win on conflict). */
 	runConfigs: () => typedError<RunConfig_Serialize[], IdeError>(__TAURI_INVOKE("run_configs")),
-	runSaveConfigs: (configs: RunConfig_Deserialize[]) => typedError<null, IdeError>(__TAURI_INVOKE("run_save_configs", { configs })),
+	runSaveConfigs: (configs: RunConfig_Deserialize[], removedDetectedIds: string[] | null) => typedError<null, IdeError>(__TAURI_INVOKE("run_save_configs", { configs, removedDetectedIds })),
 	/**  Configuration templates: per-type defaults applied to new configurations. */
 	runTemplates: () => typedError<RunConfig_Serialize[], IdeError>(__TAURI_INVOKE("run_templates")),
 	runSaveTemplates: (templates: RunConfig_Deserialize[]) => typedError<null, IdeError>(__TAURI_INVOKE("run_save_templates", { templates })),
@@ -898,7 +920,11 @@ export const commands = {
 	sshConnected: () => __TAURI_INVOKE<string[]>("ssh_connected"),
 	sshDisconnect: (id: string) => __TAURI_INVOKE<void>("ssh_disconnect", { id }),
 	/**  Answers an `IdeEvent::Askpass` prompt (`None`: cancelled); every window drops it. */
-	sshAskpassAnswer: (id: number, answer: string | null) => __TAURI_INVOKE<void>("ssh_askpass_answer", { id, answer }),
+	sshAskpassAnswer: (id: number, answer: string | null, remember: boolean) => __TAURI_INVOKE<void>("ssh_askpass_answer", { id, answer, remember }),
+	/**  Settings › Git › Saved credentials: `scheme://host` of every saved entry. */
+	gitCredentials: () => __TAURI_INVOKE<string[]>("git_credentials"),
+	/**  Forgets the credential of `key` (a `git_credentials` entry). */
+	gitCredentialForget: (key: string) => __TAURI_INVOKE<void>("git_credential_forget", { key }),
 	/**
 	 *  Tools › Start SSH Session: the system `ssh` command line for configuration `id`
 	 *  (run in a terminal tab, so prompts and host-key questions are answered there).
@@ -2048,7 +2074,9 @@ export type DbDatabases = {
 
 export type DbDriver = "sqlite" | "postgres" | 
 /**  MySQL and MariaDB. */
-"mysql";
+"mysql" | 
+/**  Microsoft SQL Server. */
+"sqlServer";
 
 /**  `schema.table (columns) REFERENCES ref_schema.ref_table (ref_columns)`. */
 export type DbForeignKey = {
@@ -2525,6 +2553,11 @@ export type DocumentInfo = {
 	 *  provides, e.g. `jdt://…`); `path` then holds the same URI.
 	 */
 	uri?: string | null,
+	/**
+	 *  CodeMirror mode replacing the language's own one (an Angular project's
+	 *  HTML templates).
+	 */
+	uiMode?: string | null,
 };
 
 /**
@@ -3121,6 +3154,8 @@ export type GoSettings = {
 
 export type GotoKind = "definition" | "declaration" | "typeDefinition" | "implementation";
 
+export type GradleDistribution = "wrapper" | "local";
+
 export type GradleModel = {
 	/**  Project-relative directory of the build (where `settings.gradle` is); `""` = project root. */
 	dir: string,
@@ -3146,6 +3181,17 @@ export type GradleProject = {
 	/**  Project-relative build script, if any. */
 	buildFile: string | null,
 	tasks: GradleTask[],
+};
+
+/**  Build Tools › Gradle. */
+export type GradleSettings = {
+	/**  Empty = Project JDK; otherwise a JDK home. */
+	jvm?: string,
+	distribution?: GradleDistribution,
+	/**  Used only for the local distribution. */
+	home?: string,
+	/**  Empty = Gradle's default user home. */
+	userHome?: string,
 };
 
 export type GradleTask = {
@@ -3301,8 +3347,13 @@ export type IdeEvent =
 { type: "docPatched"; doc: DocId; baseVersion: number; version: number; changes: TextChange[] } | 
 /**  A document's dirty flag changed (saved / modified externally). */
 { type: "docDirty"; doc: DocId; dirty: boolean } | 
-/**  An open document's language changed (Settings › File Types, Override File Type). */
-{ type: "docLanguage"; doc: DocId; language: LanguageId } | 
+/**
+ *  An open document's language changed (Settings › File Types, Override File
+ *  Type), or its UI mode (a framework's root marker appeared or went).
+ */
+{ type: "docLanguage"; doc: DocId; language: LanguageId; 
+/**  See `DocumentInfo::ui_mode`. */
+uiMode: string | null } | 
 /**  Full replacement of diagnostics for one file from one producer. */
 { type: "diagnostics"; path: IpcPath; source: string; items: Diagnostic[] } | 
 /**  Progress of a background task; `fraction` is `None` when indeterminate. */
@@ -3334,9 +3385,18 @@ cancellable: boolean } |
  */
 { type: "projectRootsChanged"; root: IpcPath } | 
 /**  A child process (`ssh`, `git`) asks for a credential; answered with `ssh_askpass_answer`. */
-{ type: "askpass"; id: number; prompt: string; kind: AskpassKind } | 
+{ type: "askpass"; id: number; prompt: string; kind: AskpassKind; 
+/**  The dialog offers "Remember" for the answer (git HTTPS passwords). */
+remember: boolean } | 
 /**  Prompt `id` was answered (in any window) or gave up. */
-{ type: "askpassDone"; id: number };
+{ type: "askpassDone"; id: number } | 
+/**
+ *  The kernel of an open notebook changed state (`starting`, `idle`, `busy`,
+ *  `dead`); `message` says why it failed to start or died.
+ */
+{ type: "notebookKernel"; 
+/**  Backend document incarnation; stale queued events cannot target a reopen. */
+id: string; path: IpcPath; state: string; message: string | null };
 
 /**  An identifier-like token whose text equals the searched name. */
 export type IdentifierOccurrence = {
@@ -3349,6 +3409,8 @@ export type IdentifierOccurrence = {
 	 */
 	qualified: boolean,
 };
+
+export type IgnoreDestination = "gitignore" | "localExclude";
 
 export type IndentConfig = IndentConfig_Serialize | IndentConfig_Deserialize;
 
@@ -3584,6 +3646,8 @@ export type JavaSettings = {
 	jdtlsVmArgs?: string,
 	/**  Build Tools › Maven. */
 	maven?: MavenSettings,
+	/**  Build Tools › Gradle. */
+	gradle?: GradleSettings,
 };
 
 /**  Java versions a vendor publishes. */
@@ -4045,6 +4109,8 @@ export type MavenProject = {
 
 /**  Build Tools › Maven. */
 export type MavenSettings = {
+	/**  Project-relative root POMs removed from the Maven project model. */
+	unlinkedProjects?: string[],
 	/**  Maven home (or its `mvn` executable); empty = the project's `mvnw`, else `mvn` on `PATH`. */
 	home?: string,
 	/**  User `settings.xml` (`-s`); empty = `~/.m2/settings.xml`. */
@@ -4174,6 +4240,43 @@ export type NotLocalReason =
  *  member, or declared in a way the query does not cover.
  */
 "unresolved";
+
+export type NotebookCell = {
+	id: string,
+	cellType: string,
+	source: string,
+	metadata: unknown,
+	outputs: unknown[],
+	executionCount: number | null,
+	attachments: unknown,
+};
+
+export type NotebookEdit = { type: "setSource"; cell: string; source: string } | { type: "insertCell"; after: string | null; cellType: string } | { type: "deleteCell"; cell: string } | { type: "moveCell"; cell: string; before: string | null } | { type: "setCellType"; cell: string; cellType: string } | { type: "setOutputs"; cell: string; outputs: unknown[]; executionCount: number | null };
+
+export type NotebookOutputEvent = {
+	id: string,
+	path: string,
+	cell: string,
+	msgId: string,
+	kind: string,
+	content: unknown,
+	version: number,
+	dirty: boolean,
+	changedCells: string[],
+};
+
+export type NotebookSnapshot = {
+	id: string,
+	path: string,
+	version: number,
+	dirty: boolean,
+	canUndo: boolean,
+	canRedo: boolean,
+	nbformat: number,
+	nbformatMinor: number,
+	metadata: unknown,
+	cells: NotebookCell[],
+};
 
 export type NotificationGroupSettings = {
 	/**  `balloon` | `sticky` | `none` */
@@ -5802,6 +5905,11 @@ export type ToolInfo = {
 	defaultArgs: string[],
 	/**  A language server's `initializationOptions` from its language definition, as JSON text. */
 	defaultInitializationOptions: string | null,
+	/**
+	 *  The interchangeable servers this one belongs to, in preference order: a
+	 *  server and the `fallback` ones after it. Empty when it has none.
+	 */
+	alternatives: string[],
 };
 
 export type ToolKind = "languageServer" | "debugger" | 

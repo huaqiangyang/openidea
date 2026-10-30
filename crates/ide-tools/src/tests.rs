@@ -24,7 +24,10 @@ impl Env {
     fn tools(&self) -> Tools {
         let mut dirs = vec![self.sys.clone()];
         dirs.extend(bin_dirs_in(&self.root, Platform::current()));
-        Tools::with_paths(self.root.clone(), std::env::join_paths(dirs).unwrap(), Platform::current())
+        let mut tools = Tools::with_paths(self.root.clone(), std::env::join_paths(dirs).unwrap(), Platform::current());
+        // These fixtures test detection and version parsing, not process startup latency.
+        tools.version_timeout = Duration::from_secs(60);
+        tools
     }
 
     #[cfg(unix)]
@@ -86,6 +89,20 @@ fn everything_missing_on_an_empty_system() {
     // Shared npm package: each server is its own row.
     assert_eq!(find(&list, "vscode-css-language-server").install_method.as_deref(), Some("npm"));
     assert!(find(&list, "delve").kind == ToolKind::Debugger);
+}
+
+#[test]
+fn interchangeable_servers_list_their_alternatives() {
+    let env = Env::new();
+    let list = env.tools().list(&langs());
+    let python = ["basedpyright", "pyright", "ty"];
+    for name in python {
+        assert_eq!(find(&list, name).alternatives, python);
+    }
+    assert_eq!(find(&list, "vtsls").alternatives, ["vtsls", "typescript-language-server"]);
+    // A regular server after a fallback starts no group with it.
+    assert!(find(&list, "angular-language-server").alternatives.is_empty());
+    assert!(find(&list, "rust-analyzer").alternatives.is_empty());
 }
 
 #[cfg(unix)]
@@ -318,7 +335,7 @@ done"#,
     }
     let installs = fs::read_to_string(&log).unwrap();
     for line in installs.lines() {
-        assert!(line.contains("typescript@<7") && !line.contains("typescript@latest"), "{line}");
+        assert!(line.contains("typescript@6") && !line.contains("typescript@latest"), "{line}");
     }
     assert!(installs.contains("@vue/language-server@latest"), "{installs}");
 

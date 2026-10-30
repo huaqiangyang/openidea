@@ -114,7 +114,13 @@ impl Shared {
     }
 
     fn known_config(&self, provider: &str) -> Vec<AgentConfigOption> {
-        self.known.lock().get(provider).map(|k| k.config.clone()).unwrap_or_default()
+        let mut config = self.known.lock().get(provider).map(|k| k.config.clone()).unwrap_or_default();
+        config::add_client_options(provider, &mut config);
+        // Approval bypass belongs to the conversation, never to another new task.
+        if let Some(o) = config.iter_mut().find(|o| o.id == config::CURSOR_APPROVAL) {
+            o.current = Some("ask".into());
+        }
+        config
     }
 
     /// The commands the agent offered last time in this project.
@@ -308,8 +314,8 @@ impl AgentManager {
     }
 
     /// The slash commands to complete for `provider`, in `task`'s directory or (without one)
-    /// in the project: what the agent offered last time there, plus, for Claude Code, the
-    /// skills and custom commands on disk it has not listed.
+    /// in the project: what the agent offered last time there, unadvertised builtins,
+    /// and, for Claude Code, skills and custom commands on disk it has not listed.
     pub async fn commands(&self, provider: &str, task: Option<&str>) -> IdeResult<Vec<AgentCommand>> {
         let (provider, offered, cwd) = match task {
             Some(id) => {
@@ -319,6 +325,14 @@ impl AgentManager {
             }
             None => (provider.to_owned(), self.shared.known_commands(provider), self.shared.paths.project_root.clone()),
         };
+        // Commands the agent implements itself and never lists (its CLI builtins):
+        // merged without duplicating what `availableCommands` or the disk offer.
+        let mut offered = offered;
+        for &(name, description) in builtin_commands(&provider) {
+            if !offered.iter().any(|c| c.name == name) {
+                offered.push(AgentCommand { name: name.to_owned(), description: description.to_owned(), hint: None });
+            }
+        }
         if provider != "claude" && provider != "claude-acp" {
             return Ok(offered);
         }
@@ -516,7 +530,7 @@ impl AgentManager {
             o.clone()
         };
         let live = task.live.lock().clone().filter(|l| !l.peer.is_closed());
-        if let Some(live) = live {
+        if let Some(live) = live.filter(|_| option != config::CURSOR_APPROVAL) {
             let (method, mut params) = config::set_request(&target, &value);
             params["sessionId"] = json!(live.session);
             let reply: Value =
@@ -533,7 +547,12 @@ impl AgentManager {
                 o.current = Some(value);
             }
             s.task.model = model_of(&s.task.config).or(s.task.model.take());
+            let provider = s.task.provider.clone();
+            let config = s.task.config.clone();
+            drop(s);
+            task.shared.remember(&provider, Some(&config), None);
         }
+        task.approve_pending();
         task.persist();
         task.emit_task();
         Ok(())
@@ -741,6 +760,26 @@ impl AgentManager {
         Ok(())
     }
 
+    /// Returns an archived task to the active list without starting the agent.
+    pub fn unarchive(&self, id: &str) -> IdeResult<()> {
+        let task = self.task(id)?;
+        {
+            let mut s = task.state.lock();
+            if s.task.status != AgentStatus::Archived {
+                return Ok(());
+            }
+            if s.busy {
+                return Err(IdeError::invalid("the task is still stopping"));
+            }
+            s.task.status = AgentStatus::Ready;
+            s.task.error = None;
+            s.task.updated_ms = now_ms();
+        }
+        task.persist();
+        task.emit_task();
+        Ok(())
+    }
+
     /// Forgets the task; with `remove_worktree` also deletes its worktree (the branch stays).
     pub async fn delete(&self, id: &str, remove_worktree: bool) -> IdeResult<()> {
         let task = self.task(id)?;
@@ -789,7 +828,8 @@ impl AgentManager {
 
 impl Task {
     fn restore(file: TaskFile, shared: Arc<Shared>) -> Arc<Self> {
-        let task = file.task;
+        let mut task = file.task;
+        config::add_client_options(&task.provider, &mut task.config);
         let conversation = Conversation::restore(file.entries, file.subagents);
         Arc::new(Self {
             id: task.id.clone(),
@@ -1174,10 +1214,16 @@ impl Task {
             let s = self.state.lock();
             (if known { reported } else { s.task.config.clone() }, s.wanted.clone())
         };
-        self.shared.remember(&provider_id, Some(&options), None);
+        config::add_client_options(&provider_id, &mut options);
         for choice in &wanted {
             // An option the session doesn't offer yet is set once it does (`apply_late_choices`).
             let Some(o) = options.iter().find(|o| o.id == choice.id).cloned() else { continue };
+            if o.id == config::CURSOR_APPROVAL {
+                if o.values.iter().any(|v| v.value == choice.value) {
+                    options.iter_mut().find(|o| o.id == choice.id).unwrap().current = Some(choice.value.clone());
+                }
+                continue;
+            }
             let already = known && o.current.as_deref() == Some(choice.value.as_str());
             if already || !o.values.iter().any(|v| v.value == choice.value) {
                 continue;
@@ -1197,6 +1243,7 @@ impl Task {
                 Err(e) => tracing::warn!("agent task {}: setting {} to {} failed: {e}", self.id, o.id, choice.value),
             }
         }
+        self.shared.remember(&provider_id, Some(&options), None);
         {
             let mut s = self.state.lock();
             s.task.model = model_of(&options).or(s.task.model.take());
@@ -1221,7 +1268,7 @@ impl Task {
             s.wanted
                 .iter()
                 .filter_map(|c| {
-                    let o = s.task.config.iter().find(|o| o.id == c.id)?;
+                    let o = s.task.config.iter().find(|o| o.id == c.id && o.id != config::CURSOR_APPROVAL)?;
                     let due = o.current.as_deref() != Some(c.value.as_str())
                         && o.values.iter().any(|v| v.value == c.value)
                         && sent.insert((c.id.clone(), c.value.clone()));
@@ -1400,6 +1447,7 @@ impl Task {
         let entry = self.push_entry(AgentEntry::Permission { id, title, options: options.clone(), chosen: None });
         self.permissions.lock().insert(id, tx);
         self.set_status(AgentStatus::NeedsInput, None);
+        self.approve_pending();
 
         let answer = rx.recv().ok().flatten();
         let name = answer
@@ -1420,6 +1468,22 @@ impl Task {
         match answer {
             Some(option) => json!({ "outcome": { "outcome": "selected", "optionId": option } }),
             None => json!({ "outcome": { "outcome": "cancelled" } }),
+        }
+    }
+
+    fn approve_pending(&self) {
+        let s = self.state.lock();
+        if self.cancel_pending.load(Ordering::Acquire) || !config::bypass_approvals(&s.task.provider, &s.task.config) {
+            return;
+        }
+        let mut pending = self.permissions.lock();
+        for entry in s.conversation.main.entries.iter().rev() {
+            if let AgentEntry::Permission { id, options, chosen: None, .. } = entry
+                && let Some(option) = options.iter().find(|o| o.kind == "allow_once")
+                && let Some(reply) = pending.remove(id)
+            {
+                let _ = reply.send(Some(option.id.clone()));
+            }
         }
     }
 
@@ -1595,6 +1659,16 @@ fn retry_of(update: &Value, now: f64) -> Option<AgentRetry> {
 
 fn model_of(config: &[AgentConfigOption]) -> Option<String> {
     config.iter().find(|o| o.category.as_deref() == Some("model")).and_then(|o| o.current.clone())
+}
+
+/// Commands the agent implements on its own and never lists in `availableCommands` —
+/// its CLI builtins, passed through as prompt text (e.g. `/compact`). `(name, description)`.
+fn builtin_commands(provider: &str) -> &'static [(&'static str, &'static str)] {
+    match provider {
+        // OpenCode ACP handles `/compact` via session.summarize but omits it from its command list.
+        "opencode" => &[("compact", "compact the conversation")],
+        _ => &[],
+    }
 }
 
 fn file_name(path: &Path) -> String {

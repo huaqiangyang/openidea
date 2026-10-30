@@ -3,6 +3,7 @@
 
 use crate::InstallEvent;
 use ide_core::error::ErrorKind;
+use ide_core::output_encoding::decode_tool_output;
 use ide_core::{CancellationToken, IdeError, IdeResult};
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
@@ -86,8 +87,9 @@ pub fn run_collect(mut cmd: Command, cancel: &CancellationToken, emit: Emit) -> 
     for pipe in pipes.into_iter().flatten() {
         let tx = tx.clone();
         std::thread::spawn(move || {
-            for line in BufReader::new(pipe).lines() {
+            for line in BufReader::new(pipe).split(b'\n') {
                 let Ok(line) = line else { break };
+                let line = decode_tool_output(&line).trim_end_matches('\r').to_owned();
                 if tx.send(line).is_err() {
                     break;
                 }
@@ -127,14 +129,14 @@ pub fn run_quiet(mut cmd: Command, timeout: Duration) -> Option<(bool, String)> 
     let mut stdout = child.stdout.take()?;
     let mut stderr = child.stderr.take()?;
     let out_t = std::thread::spawn(move || {
-        let mut s = String::new();
-        let _ = stdout.read_to_string(&mut s);
-        s
+        let mut s = Vec::new();
+        let _ = stdout.read_to_end(&mut s);
+        decode_tool_output(&s)
     });
     let err_t = std::thread::spawn(move || {
-        let mut s = String::new();
-        let _ = stderr.read_to_string(&mut s);
-        s
+        let mut s = Vec::new();
+        let _ = stderr.read_to_end(&mut s);
+        decode_tool_output(&s)
     });
     let deadline = Instant::now() + timeout;
     let status = loop {
@@ -219,7 +221,25 @@ impl Http {
 
     /// GETs `url` as text, failing when the response is larger than `max_bytes`.
     pub fn get_text_limited(&self, url: &str, max_bytes: Option<u64>, cancel: &CancellationToken) -> IdeResult<String> {
+        self.get_text_response(url, max_bytes, false, cancel)
+    }
+
+    /// Adoptium uses 404 as well as an empty array for absent platform builds.
+    pub fn get_text_or_empty_on_404(&self, url: &str, cancel: &CancellationToken) -> IdeResult<String> {
+        self.get_text_response(url, None, true, cancel)
+    }
+
+    fn get_text_response(
+        &self,
+        url: &str,
+        max_bytes: Option<u64>,
+        empty_on_404: bool,
+        cancel: &CancellationToken,
+    ) -> IdeResult<String> {
         let mut cmd = self.base(url);
+        if empty_on_404 {
+            cmd.args(["--write-out", "\n%{http_code}"]);
+        }
         if let Some(max) = max_bytes {
             cmd.arg("--max-filesize").arg(max.to_string());
         }
@@ -244,15 +264,23 @@ impl Http {
                 None => std::thread::sleep(Duration::from_millis(30)),
             }
         };
-        let body = out_t.join().unwrap_or_default();
+        let mut body = out_t.join().unwrap_or_default();
+        if empty_on_404 && let Some(split) = body.iter().rposition(|b| *b == b'\n') {
+            let code = &body[split + 1..];
+            if code == b"404" {
+                return Ok("[]".into());
+            }
+            body.truncate(split);
+        }
         if let Some(max) = max_bytes
             && body.len() as u64 > max
         {
             return Err(IdeError::new(ErrorKind::Io, format!("{url}: response is larger than {max} bytes")));
         }
         if !status.success() {
-            let mut err = String::new();
-            let _ = stderr.read_to_string(&mut err);
+            let mut err = Vec::new();
+            let _ = stderr.read_to_end(&mut err);
+            let err = decode_tool_output(&err);
             return Err(IdeError::new(ErrorKind::Io, format!("GET {url} failed: {}", err.trim())));
         }
         String::from_utf8(body).map_err(|_| IdeError::new(ErrorKind::Protocol, format!("{url}: response is not UTF-8")))
@@ -272,9 +300,9 @@ impl Http {
         let mut child = cmd.spawn().map_err(|e| IdeError::unavailable(format!("cannot run curl: {e}")))?;
         let mut stderr = child.stderr.take().expect("piped");
         let err_t = std::thread::spawn(move || {
-            let mut s = String::new();
-            let _ = stderr.read_to_string(&mut s);
-            s
+            let mut s = Vec::new();
+            let _ = stderr.read_to_end(&mut s);
+            decode_tool_output(&s)
         });
         let mut last = Instant::now();
         let mut last_bytes = 0;
@@ -357,6 +385,25 @@ mod tests {
         assert!(err.message.contains("failed"), "{}", err.message);
         let lines = lines.into_inner().unwrap();
         assert!(lines.contains(&"one".to_string()) && lines.contains(&"two".to_string()), "{lines:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn absent_build_is_empty_but_http_failures_are_not() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let curl = tmp.path().join("curl");
+        let http = Http { curl: curl.clone(), https_only: false };
+        for (code, exit, expected) in [(404, 22, Some("[]")), (200, 0, Some("payload")), (403, 22, None), (0, 7, None)]
+        {
+            std::fs::write(&curl, format!("#!/bin/sh\nprintf 'payload\\n{code:03}'\nexit {exit}\n")).unwrap();
+            std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let result = http.get_text_or_empty_on_404("https://example.test/build", &CancellationToken::new());
+            match expected {
+                Some(body) => assert_eq!(result.unwrap(), body),
+                None => assert!(result.is_err()),
+            }
+        }
     }
 
     #[cfg(unix)]

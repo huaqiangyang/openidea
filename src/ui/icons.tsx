@@ -280,6 +280,7 @@ const ICONS = {
   "db-sqlite": "openidea/database/sqlite",
   "db-postgres": "openidea/database/postgres",
   "db-mysql": "openidea/database/mysql",
+  "db-sqlserver": "openidea/database/sqlserver",
   "db-mariadb": "openidea/database/mariadb",
   "db-aurora": "openidea/database/aurora",
   "db-redshift": "openidea/database/redshift",
@@ -595,6 +596,15 @@ export function iconMarkup(name: string, size = 16, className?: string): string 
   const cls = clsx(styles.icon, p.mono && styles.mono, className);
   const html = withIds(p, `m${++markupSeq}-`);
   return `<svg class="${cls}" width="${size}" height="${size}" viewBox="${p.viewBox}" fill="none" aria-hidden="true" focusable="false">${html}</svg>`;
+}
+
+/**
+ * Gutter icon markup in the 14px gutter column. The plain play glyph fills its canvas, so it is
+ * drawn smaller; the other gutter icons (run-all, status badges, inheritance arrows, file types)
+ * carry padding or compose several shapes and need the full 14px to look the same size.
+ */
+export function gutterIconMarkup(name: string): string | null {
+  return iconMarkup(name, name === "gutter-run" ? 12 : 14);
 }
 
 /**

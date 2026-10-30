@@ -92,8 +92,8 @@ import { gitTabs, shownTab } from "./gitTabs";
 import { ChangesTree, StashContent, tabItems, useStashTabCounts } from "./CommitView";
 import { WorktreesPanel } from "./gitMenuDialogs";
 
-const ROW = 22;
-const LANE = 12;
+const ROW = 26;
+const LANE = 14;
 
 /** The Git window's tabs (they depend on the commit interface) and the one shown. */
 function useGitTabs() {
@@ -178,7 +178,7 @@ function LogView() {
       .then((all) => {
         if (!live) return;
         const signature = JSON.stringify(all);
-        if (allRefs.current !== null && allRefs.current !== signature) void reloadLog();
+        if (allRefs.current !== null && allRefs.current !== signature) void reloadLog({ preserve: true });
         allRefs.current = signature;
       })
       .catch(() => undefined);
@@ -215,7 +215,8 @@ function LogView() {
     const refs = refsSignature(branch, branches) + JSON.stringify(useVcs.getState().heads);
     const previous = lastRefs.current;
     lastRefs.current = refs;
-    if (previous !== null && previous !== refs && useGitLog.getState().commits.length) void reloadLog();
+    if (previous !== null && previous !== refs && useGitLog.getState().commits.length)
+      void reloadLog({ preserve: true });
   }, [version]);
 
   return (
@@ -742,7 +743,7 @@ function FilterBar() {
         onClear={() => setLogFilters({ path: null })}
       />
       <span className={styles.grow} />
-      <IconButton icon="refresh" title="Refresh" size="small" onClick={() => void reloadLog()} />
+      <IconButton icon="refresh" title="Refresh" size="small" onClick={() => void reloadLog({ preserve: true })} />
       <IconButton
         icon="sort"
         title="Graph Options"
@@ -1003,7 +1004,7 @@ function CommitList() {
             const c = commits[v.index];
             if (!c)
               return (
-                <div key="loading" className={styles.row} style={{ transform: `translateY(${v.start}px)` }}>
+                <div key="loading" className={styles.row} style={{ top: v.start }}>
                   <Spinner size={12} />{" "}
                   <span className={styles.muted}>
                     <T>Loading…</T>
@@ -1020,7 +1021,7 @@ function CommitList() {
                 selected={selectedSet.has(commitKey(c))}
                 head={headKeys.has(commitKey(c))}
                 mine={opts.highlightMine && isMine(c, user)}
-                onBranch={!!onBranch?.has(commitKey(c))}
+                onBranch={!onBranch || onBranch.has(commitKey(c))}
                 opts={opts}
                 remoteNames={new Set((c as RepoCommit).remoteNames ?? remoteNames)}
                 onPick={pick}
@@ -1074,8 +1075,8 @@ const CommitRow = memo(function CommitRow({
       id={id}
       role="option"
       aria-selected={selected}
-      className={clsx(styles.row, onBranch && styles.currentBranch, selected && styles.selected)}
-      style={{ transform: `translateY(${top}px)` }}
+      className={clsx(styles.row, !onBranch && styles.offBranch, selected && styles.selected)}
+      style={{ top }}
       onMouseDown={(e) => {
         if (e.shiftKey) e.preventDefault(); // no text selection on range clicks
         onPick(commitKey(c), e);
@@ -1132,6 +1133,7 @@ export function GraphCell({ row, head }: { row: GraphRow; head?: boolean }) {
           key={`u${i}`}
           d={seg(x(s.from), 0, x(s.to), cy) + (s.arrow ? arrowHead(x(s.from), 0, -1) : "")}
           stroke={laneColor(s.color)}
+          strokeLinecap={s.dashed ? "butt" : "square"}
           strokeDasharray={s.dashed ? "2 2" : undefined}
         />
       ))}
@@ -1140,13 +1142,14 @@ export function GraphCell({ row, head }: { row: GraphRow; head?: boolean }) {
           key={`d${i}`}
           d={seg(x(s.from), cy, x(s.to), ROW) + (s.arrow ? arrowHead(x(s.to), ROW, 1) : "")}
           stroke={laneColor(s.color)}
+          strokeLinecap={s.dashed ? "butt" : "square"}
           strokeDasharray={s.dashed ? "2 2" : undefined}
         />
       ))}
       <circle
         cx={x(row.lane)}
         cy={cy}
-        r={head ? 4 : 3.2}
+        r={head ? 4.5 : 3.8}
         fill={head ? "var(--bg-app)" : laneColor(row.color)}
         stroke={laneColor(row.color)}
         strokeWidth={head ? 2 : 0}

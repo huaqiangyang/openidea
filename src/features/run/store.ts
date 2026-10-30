@@ -19,7 +19,7 @@ import { downloadJdkActions } from "@/platform/jdk";
 import { useProject } from "@/platform/project";
 import { executeAction } from "@/platform/actions";
 import { workflowSettings } from "@/platform/workflowSettings";
-import { maybeEditorService, notifications, toolWindowService } from "@/workbench/contributions";
+import { maybeEditorService, notifications, toolWindowService, useDebugRunSessions } from "@/workbench/contributions";
 import { ConsoleModel } from "./console";
 import { jvmFrameTarget } from "./links";
 import { confirmRerun, confirmTerminate } from "./dialogs";
@@ -245,10 +245,6 @@ function persistTemporary() {
   );
 }
 
-export function isTemporary(id: string | null | undefined): boolean {
-  return !!id && useRun.getState().temporary.includes(id);
-}
-
 /**
  * Selects the configuration for a gutter / context run: a saved or detected
  * configuration with the same id is reused, otherwise `config` becomes a
@@ -265,6 +261,7 @@ export function adoptTemporary(config: RunConfig): RunConfig {
   const busy = new Set(
     state.sessions.filter((x) => x.status === "running" || x.status === "starting").map((x) => x.config.id),
   );
+  for (const session of useDebugRunSessions.getState().sessions) if (session.configId) busy.add(session.configId);
   while (temporary.length > MAX_TEMPORARY) {
     const evict = temporary.find((id) => id !== config.id && !busy.has(id)) ?? temporary[0]!;
     temporary = temporary.filter((id) => id !== evict);
@@ -291,14 +288,12 @@ export async function saveTemporary(id: string): Promise<void> {
   selectConfig(id);
 }
 
-/** Whether the chooser's Delete may remove `id` (user and temporary configurations; detected ones come back). */
+/** Whether the chooser's Delete may remove `id`. */
 export function canDeleteConfig(id: string): boolean {
-  const { configs, temporary } = useRun.getState();
-  const config = configs.find((c) => c.id === id);
-  return !!config && (temporary.includes(id) || !config.detected);
+  return useRun.getState().configs.some((c) => c.id === id);
 }
 
-/** Deletes a user or temporary configuration. */
+/** Deletes a configuration, suppressing detections and preserving temporary behavior. */
 export async function deleteConfig(id: string): Promise<void> {
   if (!canDeleteConfig(id)) return;
   const { configs, temporary, selectedId } = useRun.getState();
@@ -308,12 +303,20 @@ export async function deleteConfig(id: string): Promise<void> {
     persistTemporary();
     return;
   }
-  await saveUserConfigs(configs.filter((c) => !c.detected && !temporary.includes(c.id) && c.id !== id));
+  await saveUserConfigs(
+    configs.filter((c) => !c.detected && !temporary.includes(c.id) && c.id !== id),
+    configs.find((c) => c.id === id)?.detected ? [id] : [],
+  );
 }
 
 /** Persists user configurations and reloads the merged list. */
-export async function saveUserConfigs(user: RunConfig[]): Promise<void> {
-  await call(commands.runSaveConfigs(user.map((c) => ({ ...c, detected: false }))));
+export async function saveUserConfigs(user: RunConfig[], removedDetectedIds: string[] = []): Promise<void> {
+  await call(
+    commands.runSaveConfigs(
+      user.map((c) => ({ ...c, detected: false })),
+      removedDetectedIds,
+    ),
+  );
   await loadConfigs();
 }
 

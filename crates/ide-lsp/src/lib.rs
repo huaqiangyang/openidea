@@ -24,7 +24,7 @@ mod uri;
 mod virtual_doc;
 
 pub use inspect::{FileInspection, InspectHost, InspectOptions};
-pub use launch::{LaunchError, Launcher, ProcessLauncher, search_path};
+pub use launch::{LaunchError, Launcher, ProcessLauncher};
 pub use scope::{CandidateFiles, CandidateFn, CandidateQuery, MAX_CANDIDATES};
 pub use uri::{is_virtual_uri, path_to_uri_string, uri_target, uri_to_path};
 
@@ -75,6 +75,8 @@ pub type ApplyEditHook = Arc<dyn Fn(WorkspaceEdit) -> bool + Send + Sync>;
 /// settings before each launch; receives the server's workspace root.
 pub type ConfigFn = dyn Fn(&mut LanguageServerConfig, &Path) + Send + Sync;
 pub type ConfigHook = Arc<ConfigFn>;
+/// Prepares dependencies on a blocking worker immediately before launching an installed server.
+pub type PrepareFn = dyn Fn(&LanguageServerConfig, &Path, &CancellationToken) + Send + Sync;
 /// The servers a language uses, from its definition's list (user settings
 /// disable some and add others).
 pub type ServersFn = dyn Fn(&LanguageId, &[LanguageServerConfig]) -> Vec<LanguageServerConfig> + Send + Sync;
@@ -164,6 +166,7 @@ pub struct LspManager {
     docs: Mutex<HashMap<DocId, DocState>>,
     apply_edit_hook: RwLock<Option<ApplyEditHook>>,
     config_hook: RwLock<Option<ConfigHook>>,
+    prepare_hook: RwLock<Option<Arc<PrepareFn>>>,
     servers_hook: RwLock<Option<Arc<ServersFn>>>,
     candidates_hook: RwLock<Option<Arc<CandidateFn>>>,
     shutting_down: AtomicBool,
@@ -293,6 +296,7 @@ impl LspManager {
             docs: Mutex::new(HashMap::new()),
             apply_edit_hook: RwLock::new(None),
             config_hook: RwLock::new(None),
+            prepare_hook: RwLock::new(None),
             servers_hook: RwLock::new(None),
             candidates_hook: RwLock::new(None),
             shutting_down: AtomicBool::new(false),
@@ -427,7 +431,16 @@ impl LspManager {
         // The settings hook may touch the filesystem (e.g. scanning for JDKs); TCP
         // servers may take a while to start listening.
         let launched = tokio::task::spawn_blocking(move || {
-            let cfg = me.configured(&tail);
+            let mut cfg = me.configured(&tail);
+            tail.set_effective_config(cfg.clone());
+            let prepare = me.prepare_hook.read().clone();
+            if !cancel.is_cancelled()
+                && me.launcher.available(&cfg, &tail.root)
+                && let Some(prepare) = prepare
+            {
+                prepare(&cfg, &tail.root, &cancel);
+                cfg = me.configured(&tail);
+            }
             tail.set_effective_config(cfg.clone());
             let root = tail.root.clone();
             if let Some(message) = &cfg.launch_error {
@@ -1920,6 +1933,10 @@ impl LspManager {
         *self.config_hook.write() = Some(Arc::from(hook));
     }
 
+    pub fn set_prepare_hook(&self, hook: Box<PrepareFn>) {
+        *self.prepare_hook.write() = Some(Arc::from(hook));
+    }
+
     /// Installed by `src-tauri` to apply the servers enabled / defined in settings.
     pub fn set_servers_hook(&self, hook: Box<ServersFn>) {
         *self.servers_hook.write() = Some(Arc::from(hook));
@@ -1940,9 +1957,22 @@ impl LspManager {
     /// Servers no longer enabled stop; newly enabled ones attach to open documents.
     pub async fn reconfigure(&self) {
         self.stop_unlisted().await;
+        let Some(me) = self.me.upgrade() else { return };
         let servers: Vec<Arc<Server>> = self.servers.lock().clone();
         for s in servers {
-            let next = self.configured(&s);
+            // The settings hook may run tools (`npm root -g`), as when the server starts.
+            let next = match tokio::task::spawn_blocking({
+                let (me, s) = (me.clone(), s.clone());
+                move || me.configured(&s)
+            })
+            .await
+            {
+                Ok(next) => next,
+                Err(e) => {
+                    tracing::warn!("{}: settings hook failed: {e}", s.name);
+                    continue;
+                }
+            };
             let current = s.effective_config();
             if next == current {
                 continue;
