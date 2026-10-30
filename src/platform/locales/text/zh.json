@@ -4736,7 +4736,7 @@
   "Sort by Type": "按类型排序",
   "Sort by Modification Time": "按修改时间排序",
   "Add Mouse Shortcut": "添加鼠标快捷键",
-  "Click here with a mouse side button, holding any modifiers": "按住任意修饰键，用鼠标侧键点击此处",
+  "Click here with Ctrl, Alt or Command held, or use a mouse side button": "按住 Ctrl、Alt 或 Command 在此点击，或使用鼠标侧键",
   "Mouse shortcut": "鼠标快捷键",
   "Mouse Shortcut: {action}": "鼠标快捷键：{action}",
   "Accept Left Side": "接受左侧",
