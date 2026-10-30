@@ -297,7 +297,7 @@ fn watcher_reports_changes() {
     fs::remove_file(r.join("existing.txt")).unwrap();
 
     let all = |b: &[FsBatch]| -> BTreeSet<PathBuf> {
-        b.iter().flat_map(|b| b.created.iter().chain(&b.modified).chain(&b.removed).cloned()).collect()
+        b.iter().flat_map(|b| b.created.iter().chain(&b.modified).chain(&b.removed).chain(&b.vcs).cloned()).collect()
     };
     assert!(
         wait_for(&batches, |b| {

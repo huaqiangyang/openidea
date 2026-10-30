@@ -77,11 +77,16 @@ impl Watcher {
         let shared = filter.excludes.clone();
         let rules = filter.gitignore.clone();
         let emit = move |batch: &FsBatch| {
-            sink.emit(IdeEvent::FsChanged {
-                created: batch.created.iter().map(Into::into).collect(),
-                modified: batch.modified.iter().map(Into::into).collect(),
-                removed: batch.removed.iter().map(Into::into).collect(),
-            });
+            // VCS-metadata-only batches (`batch.vcs`) carry no worktree paths:
+            // consumers that refresh on any `fsChanged` would reschedule purely
+            // from the backend's own `.git/index` write.
+            if !(batch.created.is_empty() && batch.modified.is_empty() && batch.removed.is_empty()) {
+                sink.emit(IdeEvent::FsChanged {
+                    created: batch.created.iter().map(Into::into).collect(),
+                    modified: batch.modified.iter().map(Into::into).collect(),
+                    removed: batch.removed.iter().map(Into::into).collect(),
+                });
+            }
             on_change(batch);
         };
         let inner = match mode {
@@ -517,7 +522,7 @@ impl EventFilter {
         let mut batch = FsBatch::default();
         for (path, change) in changes {
             if change == Change::Vcs {
-                batch.modified.push(path);
+                batch.vcs.push(path);
                 continue;
             }
             let meta = path.symlink_metadata().ok();
@@ -594,10 +599,8 @@ mod tests {
         ];
         let batch = filter.batch(&events);
         assert_eq!(batch.created, vec![root.join("a.txt")]);
-        assert_eq!(
-            batch.modified,
-            vec![root.join(".git/HEAD"), root.join(".git/refs/heads/feature"), root.join("kept.txt")]
-        );
+        assert_eq!(batch.vcs, vec![root.join(".git/HEAD"), root.join(".git/refs/heads/feature")]);
+        assert_eq!(batch.modified, vec![root.join("kept.txt")]);
         assert_eq!(batch.removed, vec![root.join("from.txt"), root.join("gone.txt"), root.join("old.txt")]);
     }
 

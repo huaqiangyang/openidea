@@ -234,7 +234,7 @@ impl Host {
                     // A repository was cloned / initialised / removed below the project: its
                     // `.git/HEAD` (the watcher reports nothing else of `.git`) appeared or went.
                     let known = repos.read().roots();
-                    let git_dirs = changed.iter().chain(&batch.removed).any(|p| {
+                    let git_dirs = changed.iter().chain(&batch.removed).chain(&batch.vcs).any(|p| {
                         let Some(dir) = p.ends_with(".git/HEAD").then(|| p.parent().and_then(Path::parent)).flatten()
                         else {
                             return false;
@@ -244,7 +244,10 @@ impl Host {
                     if git_dirs {
                         scan_repositories(&root, &repos, &settings, &sink);
                     }
-                    sink.emit(IdeEvent::VcsChanged { root: root.clone().into() });
+                    let vcs_moved = batch.vcs.iter().any(|p| vcs_path_changed(p));
+                    if git_dirs || vcs_moved {
+                        sink.emit(IdeEvent::VcsChanged { root: root.clone().into() });
+                    }
                 }),
             )?
         };
@@ -1006,5 +1009,51 @@ mod maven_linkage_tests {
         settings.languages.java.maven.unlinked_projects.push("b/pom.xml".into());
         let model = crate::ops::build::load(tmp.path(), &tmp.path().join("cache"), &settings);
         assert!(model.maven.unwrap().projects.is_empty());
+    }
+}
+
+fn vcs_path_changed(path: &Path) -> bool {
+    !path.ends_with(".git/index") || !ide_vcs::is_own_index_write(path)
+}
+
+#[cfg(test)]
+mod index_event_tests {
+    use super::vcs_path_changed;
+
+    #[test]
+    fn status_write_is_suppressed_but_external_index_and_refs_refresh() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").current_dir(dir).args(args).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        };
+        git(&["init", "-q"]);
+        let file = dir.join("file.txt");
+        std::fs::write(&file, "original\n").unwrap();
+        git(&["add", "file.txt"]);
+        // Same contents, different stat data: status must refresh the index.
+        std::fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1))
+            .unwrap();
+        let index = dir.join(".git/index");
+        let before = std::fs::read(&index).unwrap();
+        let repo = ide_vcs::Repo::discover(dir).unwrap().unwrap();
+        repo.status().unwrap();
+        assert_ne!(before, std::fs::read(&index).unwrap(), "status must actually write the index");
+        assert!(!vcs_path_changed(&index));
+        assert!(!vcs_path_changed(&index), "duplicate notifications for the same identity");
+        for path in [".git/HEAD", ".git/refs/heads/main", ".git/packed-refs"] {
+            assert!(vcs_path_changed(&dir.join(path)));
+        }
+        std::fs::write(&file, "external staged change\n").unwrap();
+        git(&["add", "file.txt"]);
+        assert!(vcs_path_changed(&index));
+        assert!(vcs_path_changed(&index));
+        std::fs::remove_file(&index).unwrap();
+        assert!(vcs_path_changed(&index));
     }
 }

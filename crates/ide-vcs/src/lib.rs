@@ -443,6 +443,7 @@ mod cli;
 mod diff;
 mod history;
 mod ignore;
+mod index_writes;
 mod manage;
 mod ops;
 mod patch;
@@ -452,6 +453,7 @@ mod repo;
 mod roots;
 pub mod shelf;
 mod status;
+pub use index_writes::is_own_index_write;
 mod text_encoding;
 mod write;
 
