@@ -2,7 +2,6 @@ import { redo, undo } from "@codemirror/commands";
 import { EditorView } from "@codemirror/view";
 import type { Action } from "@/platform/actions";
 import { t } from "@/platform/i18n";
-import { copyText } from "@/ui/selectableText";
 import { call, commands, isTauri } from "@/platform/ipc";
 import { maybeEditorService, notifications } from "@/workbench/contributions";
 import { showAbout } from "./AboutDialog";
@@ -45,15 +44,6 @@ export function editCommand(command: "undo" | "redo" | "cut" | "copy" | "paste" 
       const view = focused instanceof HTMLElement ? EditorView.findFromDOM(focused) : null;
       if (view) {
         (command === "undo" ? undo : redo)(view);
-        return;
-      }
-    }
-    if (command === "copy") {
-      const focused = document.activeElement;
-      const editable = focused?.closest("input, textarea, [contenteditable], .cm-editor, .xterm");
-      const selection = window.getSelection();
-      if (!editable && selection && !selection.isCollapsed && selection.toString()) {
-        void copyText(selection.toString());
         return;
       }
     }

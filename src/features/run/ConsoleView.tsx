@@ -1,3 +1,4 @@
+import { copySelectionOnKeyDown } from "@/ui/selectableText";
 import {
   memo,
   useEffect,
@@ -217,7 +218,8 @@ export function ConsoleView({
     ]);
   };
 
-  const onKeyDown = (e: KeyboardEvent) => {
+  const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (copySelectionOnKeyDown(e)) return;
     if (!input || e.nativeEvent.isComposing) return;
     if (e.key === "d" && e.ctrlKey && !e.metaKey && !e.altKey) {
       e.preventDefault();
