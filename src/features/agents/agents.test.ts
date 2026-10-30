@@ -288,5 +288,7 @@ describe("typed path references", () => {
     expect(resolveTyped("/r/idea", "../kalo/a.ts")).toBe("/r/kalo/a.ts");
     expect(resolveTyped("/r/idea", "./src")).toBe("/r/idea/src");
     expect(resolveTyped("/r/idea", "/etc/hosts")).toBe("/etc/hosts");
+    expect(resolveTyped("C:\\r\\idea", "../kalo/a.ts")).toBe("C:/r/kalo/a.ts");
+    expect(resolveTyped("C:\\r", "../../x")).toBe("C:/x");
   });
 });
