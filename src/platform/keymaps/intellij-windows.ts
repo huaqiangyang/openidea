@@ -4,6 +4,7 @@
  * there stay unbound here.
  */
 export const intellijWindows: Record<string, string[]> = {
+  "edit.copy": ["Ctrl+C", "Ctrl+Insert"],
   // Navigate
   "navigate.searchEverywhere": ["Shift Shift"],
   "navigate.gotoClass": ["Ctrl+N"],

@@ -110,7 +110,7 @@ describe("terminal keys", () => {
       kind: "send",
       data: "\x04",
     });
-    expect(terminalKeyAction(key({ key: "c", code: "KeyC", ctrlKey: true }), true)).toEqual({
+    expect(terminalKeyAction(key({ key: "c", code: "KeyC", ctrlKey: true }), false)).toEqual({
       kind: "send",
       data: "\x03",
     });
@@ -147,6 +147,15 @@ describe("terminal keys", () => {
       kind: "send",
       data: "\x0a",
     });
+  });
+
+  it.each([
+    { key: "c", code: "KeyC", ctrlKey: true },
+    { key: "c", code: "KeyI", ctrlKey: true },
+    { key: "C", code: "KeyC", ctrlKey: true, shiftKey: true },
+    { key: "c", code: "KeyC", metaKey: true },
+  ])("copies terminal selections with %o", (stroke) => {
+    expect(terminalKeyAction(key(stroke), true)).toEqual({ kind: "copy" });
   });
 
   it("implements macOS conveniences", () => {

@@ -20,6 +20,7 @@ import { findOutputLinks, type OutputLink } from "./links";
 import { openTarget, openUrl } from "./navigate";
 import { segmentLine } from "./segments";
 import styles from "./Run.module.css";
+import { hostBinding, formatBinding } from "@/platform/keymap";
 import { tx } from "@/platform/i18n";
 
 const ROW = 20;
@@ -203,7 +204,7 @@ export function ConsoleView({
       {
         label: "Copy",
         icon: "copy",
-        shortcut: "⌘C",
+        shortcut: formatBinding(hostBinding("Meta+C")),
         disabled: !selection,
         run: () => void navigator.clipboard?.writeText(selection).catch(() => undefined),
       },
