@@ -97,7 +97,7 @@ export function WindowGroupTabs() {
             <IconButton
               icon="close"
               size="small"
-              title={`Close ${tab.name}`}
+              title={tx`Close ${tab.name}`}
               onClick={() => run(executeAction("window.closeTab", tab.label))}
             />
           </div>

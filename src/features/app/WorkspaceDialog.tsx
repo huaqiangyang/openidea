@@ -127,7 +127,7 @@ function WorkspaceDialog({ mode, onClose }: { mode: "create" | "manage"; onClose
               </div>
               <IconButton
                 icon="close"
-                title={`Remove ${basename(root)}`}
+                title={tx`Remove ${basename(root)}`}
                 disabled={busy}
                 onClick={() => setProjects(projects.filter((p) => p !== root))}
               />

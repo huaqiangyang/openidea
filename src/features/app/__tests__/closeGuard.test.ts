@@ -161,13 +161,21 @@ describe("decideClose", () => {
 
 it("includes pending local edits and restored dirty buffers before backend dirty events", async () => {
   const service = await import("@/workbench/contributions");
-  const { dirtyCount, _setDirtyForTests } = await import("../closeGuard");
+  const { dirtyCount, installCloseGuard, confirmLeave } = await import("../closeGuard");
+  const { emitLocalIdeEvent } = await import("@/platform/ipc");
+  const { d, asked } = deps([{ button: "cancel", checked: false }]);
+  const uninstall = installCloseGuard(d);
   const spy = vi.spyOn(service, "maybeEditorService").mockReturnValue({ dirtyDocumentIds: () => [10, 11] } as never);
   try {
-    _setDirtyForTests([11, 12]);
+    emitLocalIdeEvent({ type: "docDirty", doc: 11, dirty: true });
+    emitLocalIdeEvent({ type: "docDirty", doc: 12, dirty: true });
     expect(dirtyCount()).toBe(3);
+    await expect(confirmLeave(d)).resolves.toBe(false);
+    expect(asked[0]?.body).toContain("3");
   } finally {
-    _setDirtyForTests([]);
+    emitLocalIdeEvent({ type: "docDirty", doc: 11, dirty: false });
+    emitLocalIdeEvent({ type: "docDirty", doc: 12, dirty: false });
+    uninstall();
     spy.mockRestore();
   }
 });

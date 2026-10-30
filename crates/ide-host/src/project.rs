@@ -165,8 +165,8 @@ impl Host {
                     ide_sdk::jdtls::launch_directly(cfg);
                 }
                 ide_sdk::apply::server_protocol_overrides(cfg, &effective);
-                let excluded_poms = unlinked_maven_poms(&root, &effective);
-                ide_sdk::apply::configure_maven_import(cfg, &root, &excluded_poms);
+                let excluded_poms = unlinked_maven_poms(root, &effective);
+                ide_sdk::apply::configure_maven_import(cfg, root, &excluded_poms);
             }));
         }
         {

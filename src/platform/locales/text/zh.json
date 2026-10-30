@@ -4928,5 +4928,9 @@
   "Project folder path": "项目文件夹路径",
   "Add the projects you want to work on together.": "添加需要一起工作的项目。",
   "Project folders stay in place. Removing a project here keeps its files.": "项目文件夹保留在原位置。从此处移除项目不会删除文件。",
-  "Window group": "窗口组"
+  "Window group": "窗口组",
+  "Select Project Tab": "选择项目标签页",
+  "Close Project Tab": "关闭项目标签页",
+  "Reorder Project Tabs": "重新排列项目标签页",
+  "Close {name}": "关闭 {name}"
 }
